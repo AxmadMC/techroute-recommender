@@ -1,10 +1,16 @@
 import json
+import logging
+import secrets
+
+import pytest
 
 from src.path_generator import (
     FALLBACK_SOURCE,
     GEMINI_SOURCE,
     generate_learning_path,
+    validate_profile,
 )
+from src.logging_config import configure_logging
 
 
 def make_opportunities():
@@ -59,6 +65,23 @@ def make_opportunities():
             "skills": "programming;git",
             "eligibility": "",
             "url": "https://example.test/internship",
+        },
+        {
+            "id": 4,
+            "title": "Home Lab: Local Environment",
+            "provider": "Example Labs",
+            "category": "project",
+            "career_track": "software_engineering",
+            "format": "project_based",
+            "difficulty": 0.25,
+            "hours_required": 4.0,
+            "cost_type": "free",
+            "cost_usd": 0.0,
+            "remote": True,
+            "career_value": 0.5,
+            "skills": "home_lab;virtualization",
+            "eligibility": "",
+            "url": "https://example.test/lab",
         },
     ]
 
@@ -119,7 +142,9 @@ def test_made_up_title_is_rejected_and_falls_back(monkeypatch):
         gemini_call=lambda prompt, model: json.dumps(invented),
     )
 
-    assert result["source"] == FALLBACK_SOURCE
+    assert result["source"] == (
+        f"{FALLBACK_SOURCE} (reason: AI output referenced an opportunity not in the retrieved data)"
+    )
     retrieved_titles = {item["title"] for item in make_opportunities()}
     assert all(
         title in retrieved_titles
@@ -140,7 +165,7 @@ def test_invalid_json_falls_back(monkeypatch):
         gemini_call=lambda prompt, model: "not valid JSON",
     )
 
-    assert result["source"] == FALLBACK_SOURCE
+    assert result["source"] == f"{FALLBACK_SOURCE} (reason: invalid JSON)"
 
 
 def test_missing_api_key_uses_fallback(monkeypatch):
@@ -151,7 +176,25 @@ def test_missing_api_key_uses_fallback(monkeypatch):
 
     result = generate_learning_path(make_profile(), make_opportunities())
 
-    assert result["source"] == FALLBACK_SOURCE
+    assert result["source"] == f"{FALLBACK_SOURCE} (reason: no API key)"
+
+
+def test_gemini_api_error_uses_fallback_reason(monkeypatch):
+    monkeypatch.setattr(
+        "src.path_generator._load_gemini_config",
+        lambda: (None, "gemini-test"),
+    )
+
+    def failed_call(prompt, model):
+        raise RuntimeError("private API failure details")
+
+    result = generate_learning_path(
+        make_profile(),
+        make_opportunities(),
+        gemini_call=failed_call,
+    )
+
+    assert result["source"] == f"{FALLBACK_SOURCE} (reason: Gemini API error)"
 
 
 def test_valid_retrieved_titles_are_accepted(monkeypatch):
@@ -214,3 +257,64 @@ def test_fallback_apply_step_says_when_no_internships_exist(monkeypatch):
         "goal"
     ].lower()
     assert apply_step["opportunity_titles"] == []
+
+
+def test_fallback_groups_projects_and_internships_by_stage(monkeypatch):
+    monkeypatch.setattr(
+        "src.path_generator._load_gemini_config",
+        lambda: (None, "gemini-test"),
+    )
+
+    result = generate_learning_path(make_profile(), make_opportunities())
+
+    stages = {step["stage"]: step["opportunity_titles"] for step in result["steps"]}
+    assert stages["Foundations"] == ["Intro to Python"]
+    assert stages["Build Skills"] == ["Home Lab: Local Environment"]
+    assert stages["Prove Skills"] == ["Build a Small API"]
+    assert stages["Apply"] == ["Example Software Internship"]
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"target_track": "unknown_track"}, "target_track"),
+        ({"skill_level": -0.1}, "skill_level"),
+        ({"skill_level": 1.1}, "skill_level"),
+        ({"max_hours": -1}, "max_hours"),
+    ],
+)
+def test_invalid_profile_values_raise_validation_errors(changes, message):
+    profile = make_profile(**changes)
+
+    with pytest.raises(ValueError, match=message):
+        validate_profile(profile)
+
+
+def test_api_key_and_full_profile_are_never_logged(monkeypatch, tmp_path):
+    secret_key = secrets.token_urlsafe(24)
+    log_path = tmp_path / "logs" / "techroute.log"
+    logger = configure_logging(log_path)
+    monkeypatch.setattr(
+        "src.path_generator._load_gemini_config",
+        lambda: (secret_key, "gemini-test"),
+    )
+    private_marker = "profile-private-marker"
+    profile = make_profile(private_interest=private_marker)
+
+    result = generate_learning_path(
+        profile,
+        make_opportunities(),
+        gemini_call=lambda prompt, model: make_valid_response(),
+    )
+    for handler in logger.handlers:
+        handler.flush()
+        handler.close()
+        logger.removeHandler(handler)
+
+    log_text = log_path.read_text(encoding="utf-8")
+    assert result["source"] == GEMINI_SOURCE
+    assert secret_key not in log_text
+    assert repr(profile) not in log_text
+    assert private_marker not in log_text
+    assert "target_track=software_engineering" in log_text
+    assert "reason=valid JSON and retrieved titles verified" in log_text

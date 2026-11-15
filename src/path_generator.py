@@ -1,6 +1,7 @@
 """Generate a learning path from retrieved TechRoute opportunities."""
 
 import json
+import logging
 import math
 import os
 import re
@@ -14,7 +15,7 @@ from dotenv import load_dotenv
 from src.recommender import recommend_opportunities
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL = "gemini-4-hydrogen"
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
 GEMINI_SOURCE = "Source: Gemini (verified against retrieved data)"
 FALLBACK_SOURCE = "Source: rule-based fallback"
 
@@ -39,20 +40,40 @@ ALLOWED_FORMATS = {
 ALLOWED_STAGES = {"Foundations", "Build Skills", "Prove Skills", "Apply"}
 INTERNSHIP_TYPES = {"internship", "job"}
 INTEREST_PATTERN = re.compile(r"[a-z0-9_+-]{1,50}")
+PROMPT_FIELDS = (
+    "title",
+    "provider",
+    "type",
+    "difficulty",
+    "cost_type",
+    "cost_usd",
+    "hours_required",
+    "url",
+)
 
 GeminiCall = Callable[[str, str], str]
 LearningPath = Dict[str, object]
+logger = logging.getLogger("techroute")
 
 
-def _sanitize_profile(profile: Dict) -> Dict[str, object]:
-    """Keep only validated learning preferences and drop all unknown keys."""
+class AIOutputRejected(ValueError):
+    """AI output failed a source-data or response-shape check."""
+
+
+def validate_profile(profile: Dict) -> Dict[str, object]:
+    """Validate and return only the supported learning preferences."""
     target_track = profile.get("target_track")
-    if target_track not in ALLOWED_TRACKS:
-        target_track = None
+    if target_track is not None and (
+        not isinstance(target_track, str) or target_track not in ALLOWED_TRACKS
+    ):
+        raise ValueError("target_track must be a supported career track.")
 
     preferred_format = profile.get("preferred_format")
-    if preferred_format not in ALLOWED_FORMATS:
-        preferred_format = None
+    if preferred_format is not None and (
+        not isinstance(preferred_format, str)
+        or preferred_format not in ALLOWED_FORMATS
+    ):
+        raise ValueError("preferred_format must be a supported learning format.")
 
     skill_level = profile.get("skill_level", 0.3)
     if (
@@ -61,36 +82,41 @@ def _sanitize_profile(profile: Dict) -> Dict[str, object]:
         or not math.isfinite(skill_level)
         or not 0 <= skill_level <= 1
     ):
-        skill_level = 0.3
+        raise ValueError("skill_level must be a number from 0 to 1.")
 
     max_hours = profile.get("max_hours")
-    if (
+    if max_hours is not None and (
         isinstance(max_hours, bool)
         or not isinstance(max_hours, (int, float))
         or not math.isfinite(max_hours)
-        or max_hours <= 0
+        or max_hours < 0
     ):
-        max_hours = None
+        raise ValueError("max_hours must be a non-negative number.")
+
+    prefers_free = profile.get("prefers_free", True)
+    if not isinstance(prefers_free, bool):
+        raise ValueError("prefers_free must be true or false.")
+
+    needs_remote = profile.get("needs_remote")
+    if needs_remote is not None and not isinstance(needs_remote, bool):
+        raise ValueError("needs_remote must be true, false, or unset.")
 
     raw_interests = profile.get("interests", [])
+    if not isinstance(raw_interests, list):
+        raise ValueError("interests must be a list of learning tags.")
     interests = []
-    if isinstance(raw_interests, list):
-        for value in raw_interests:
-            if isinstance(value, str):
-                tag = value.strip().lower()
-                if INTEREST_PATTERN.fullmatch(tag) and tag not in interests:
-                    interests.append(tag)
+    for value in raw_interests:
+        if isinstance(value, str):
+            tag = value.strip().lower()
+            if INTEREST_PATTERN.fullmatch(tag) and tag not in interests:
+                interests.append(tag)
 
     return {
         "target_track": target_track,
         "preferred_format": preferred_format,
         "skill_level": skill_level,
-        "prefers_free": profile.get("prefers_free")
-        if isinstance(profile.get("prefers_free"), bool)
-        else True,
-        "needs_remote": profile.get("needs_remote")
-        if isinstance(profile.get("needs_remote"), bool)
-        else None,
+        "prefers_free": prefers_free,
+        "needs_remote": needs_remote,
         "max_hours": max_hours,
         "interests": interests,
     }
@@ -100,15 +126,36 @@ def _retrieve_opportunities(
     profile: Dict[str, object], opportunities: List[Dict]
 ) -> List[Dict[str, object]]:
     """Retrieve ranked recommendations and matching track internships/jobs."""
+    needs_remote = profile.get("needs_remote") is True
+    eligible = [
+        item
+        for item in opportunities
+        if not needs_remote or item.get("remote") is True
+    ]
+    filtered_count = len(opportunities) - len(eligible)
+    skill_level = profile["skill_level"]
+    penalized_count = sum(
+        skill_level < 0.5
+        and "prior_experience"
+        in set((item.get("eligibility") or "").split(";"))
+        for item in eligible
+    )
+    target_track = profile.get("target_track") or "unspecified"
+    logger.info(
+        "guardrails_applied target_track=%s filtered=%d penalized=%d",
+        target_track,
+        filtered_count,
+        penalized_count,
+    )
+
     with redirect_stdout(StringIO()):
         primary = recommend_opportunities(profile, opportunities, k=8)
 
     retrieved: List[Dict] = [item for item, _, _ in primary]
-    target_track = profile.get("target_track")
     track_internships = [
         item
         for item in opportunities
-        if item.get("career_track") == target_track
+        if item.get("career_track") == profile.get("target_track")
         and item.get("category") in INTERNSHIP_TYPES
     ]
     if track_internships:
@@ -122,8 +169,14 @@ def _retrieve_opportunities(
                 seen_ids.add(item.get("id"))
                 seen_titles.add(item.get("title"))
 
+    logger.info(
+        "retrieval_complete target_track=%s count=%d",
+        target_track,
+        len(retrieved),
+    )
     return [
         {
+            "id": item.get("id"),
             "title": item["title"],
             "provider": item["provider"],
             "type": item["category"],
@@ -132,6 +185,7 @@ def _retrieve_opportunities(
             "cost_usd": item["cost_usd"],
             "hours_required": item.get("hours_required"),
             "url": item["url"],
+            "skills": item.get("skills", ""),
         }
         for item in retrieved
     ]
@@ -140,6 +194,10 @@ def _retrieve_opportunities(
 def _build_prompt(
     profile: Dict[str, object], retrieved: List[Dict[str, object]]
 ) -> str:
+    prompt_opportunities = [
+        {key: item[key] for key in PROMPT_FIELDS}
+        for item in retrieved
+    ]
     has_apply_items = any(item["type"] in INTERNSHIP_TYPES for item in retrieved)
     apply_instruction = (
         "Include an Apply step using retrieved internship or job titles."
@@ -163,7 +221,7 @@ def _build_prompt(
         "Student learning preferences (the complete allowlisted profile):\n"
         f"{json.dumps(profile, sort_keys=True)}\n\n"
         "Retrieved opportunities (the only allowed resources):\n"
-        f"{json.dumps(retrieved, sort_keys=True)}"
+        f"{json.dumps(prompt_opportunities, sort_keys=True)}"
     )
 
 
@@ -185,9 +243,12 @@ def _call_gemini(prompt: str, api_key: str, model: str) -> str:
 def _validate_response(
     response_text: str, retrieved: List[Dict[str, object]]
 ) -> List[Dict[str, object]]:
-    parsed = json.loads(response_text)
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError as error:
+        raise AIOutputRejected("invalid JSON") from error
     if not isinstance(parsed, list) or not parsed:
-        raise ValueError("Expected a non-empty JSON list of path steps")
+        raise AIOutputRejected("invalid response structure")
 
     allowed_titles = {item["title"] for item in retrieved}
     apply_titles = {
@@ -206,33 +267,50 @@ def _validate_response(
 
     for index, step in enumerate(parsed, start=1):
         if not isinstance(step, dict) or set(step) != expected_keys:
-            raise ValueError("Path step has an invalid shape")
-        if step["step_number"] != index or step["stage"] not in ALLOWED_STAGES:
-            raise ValueError("Path step has an invalid number or stage")
-        if not isinstance(step["goal"], str) or not step["goal"].strip():
-            raise ValueError("Path step is missing a goal")
-        if not isinstance(step["why"], str) or not step["why"].strip():
-            raise ValueError("Path step is missing a reason")
-        titles = step["opportunity_titles"]
-        if not isinstance(titles, list) or any(
-            not isinstance(title, str) or title not in allowed_titles
-            for title in titles
+            raise AIOutputRejected("invalid response structure")
+        if (
+            type(step["step_number"]) is not int
+            or step["step_number"] != index
+            or not isinstance(step["stage"], str)
+            or step["stage"] not in ALLOWED_STAGES
         ):
-            raise ValueError("Path references an opportunity outside retrieved data")
+            raise AIOutputRejected("invalid step number or stage")
+        if not isinstance(step["goal"], str) or not step["goal"].strip():
+            raise AIOutputRejected("missing step goal")
+        if not isinstance(step["why"], str) or not step["why"].strip():
+            raise AIOutputRejected("missing step reason")
+        titles = step["opportunity_titles"]
+        if not isinstance(titles, list):
+            raise AIOutputRejected("invalid opportunity title list")
+        if any(not isinstance(title, str) or title not in allowed_titles for title in titles):
+            raise AIOutputRejected(
+                "AI output referenced an opportunity not in the retrieved data"
+            )
         if step["stage"] == "Apply":
             if apply_titles and not set(titles).intersection(apply_titles):
-                raise ValueError("Apply step does not use a retrieved internship or job")
+                raise AIOutputRejected("Apply step omitted retrieved internship/job")
             if not apply_titles:
                 text = f"{step['goal']} {step['why']}".lower()
                 if titles or "dataset" not in text or not (
                     "no " in text or "none" in text
                 ):
-                    raise ValueError("Apply step must state no items are in the dataset")
+                    raise AIOutputRejected("Apply step omitted no-items notice")
         validated.append(step)
 
     if not any(step["stage"] == "Apply" for step in validated):
-        raise ValueError("Path is missing its Apply step")
+        raise AIOutputRejected("missing Apply step")
     return validated
+
+
+def _is_tool_or_lab(item: Dict[str, object]) -> bool:
+    title = item["title"].lower()
+    skills = set((item.get("skills") or "").split(";"))
+    tool_tags = {"home_lab", "packet_tracer", "wireshark", "virtualization"}
+    return (
+        item["type"] == "project" and ("lab" in title or "home_lab" in skills)
+    ) or bool(skills & tool_tags - {"home_lab"}) or any(
+        tool in title for tool in ("packet tracer", "wireshark", "virtualbox")
+    )
 
 
 def _fallback_path(retrieved: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -243,25 +321,24 @@ def _fallback_path(retrieved: List[Dict[str, object]]) -> List[Dict[str, object]
             item["title"],
         ),
     )
-    used = set()
-
-    def choose(types):
-        for item in ordered:
-            if item["type"] in types and item["title"] not in used:
-                used.add(item["title"])
-                return [item["title"]]
-        return []
-
-    foundations = choose({"course"})
-    if not foundations:
-        foundations = choose({"career", "certification", "program", "project"})
-    build_skills = choose({"project", "program", "course"})
-    prove_skills = choose({"certification", "project", "course"})
-    apply_titles = [
+    foundations = [
         item["title"]
         for item in ordered
-        if item["type"] in INTERNSHIP_TYPES
-    ][:2]
+        if item["type"] in {"course", "program", "career"}
+        and not _is_tool_or_lab(item)
+    ]
+    build_skills = [
+        item["title"] for item in ordered if _is_tool_or_lab(item)
+    ]
+    prove_skills = [
+        item["title"]
+        for item in ordered
+        if item["type"] in {"project", "certification", "volunteer"}
+        and item["title"] not in build_skills
+    ]
+    apply_titles = [
+        item["title"] for item in ordered if item["type"] in INTERNSHIP_TYPES
+    ]
 
     if apply_titles:
         apply_goal = "Use the retrieved internship or job opportunities to apply."
@@ -276,23 +353,23 @@ def _fallback_path(retrieved: List[Dict[str, object]]) -> List[Dict[str, object]
         {
             "step_number": 1,
             "stage": "Foundations",
-            "goal": "Build foundational knowledge from a retrieved learning resource.",
+            "goal": "Build foundational knowledge from retrieved learning resources.",
             "opportunity_titles": foundations,
-            "why": "Start with an available lower-difficulty opportunity.",
+            "why": "Begin with courses and other foundational learning resources.",
         },
         {
             "step_number": 2,
             "stage": "Build Skills",
-            "goal": "Practice by completing a retrieved hands-on opportunity.",
+            "goal": "Practice with retrieved tools and hands-on labs.",
             "opportunity_titles": build_skills,
-            "why": "Hands-on work helps turn foundational knowledge into practice.",
+            "why": "These retrieved resources provide practical tool or lab experience.",
         },
         {
             "step_number": 3,
             "stage": "Prove Skills",
-            "goal": "Demonstrate skills with a retrieved credential or portfolio item.",
+            "goal": "Demonstrate skills with retrieved projects and credentials.",
             "opportunity_titles": prove_skills,
-            "why": "Use an available opportunity to show progress.",
+            "why": "Projects, certifications, and contributions can demonstrate progress.",
         },
         {
             "step_number": 4,
@@ -304,29 +381,59 @@ def _fallback_path(retrieved: List[Dict[str, object]]) -> List[Dict[str, object]
     ]
 
 
+def _fallback(
+    reason: str, retrieved: List[Dict[str, object]], target_track: Optional[str]
+) -> LearningPath:
+    logger.info(
+        "fallback_used target_track=%s reason=%s",
+        target_track or "unspecified",
+        reason,
+    )
+    return {
+        "source": f"{FALLBACK_SOURCE} (reason: {reason})",
+        "steps": _fallback_path(retrieved),
+    }
+
+
 def generate_learning_path(
     profile: Dict, opportunities: List[Dict], gemini_call: Optional[GeminiCall] = None
 ) -> LearningPath:
     """Generate a verified Gemini path or a deterministic retrieved-data fallback."""
-    safe_profile = _sanitize_profile(profile)
+    safe_profile = validate_profile(profile)
     retrieved = _retrieve_opportunities(safe_profile, opportunities)
-    fallback = {
-        "source": FALLBACK_SOURCE,
-        "steps": _fallback_path(retrieved),
-    }
+    target_track = safe_profile.get("target_track")
     api_key, model = _load_gemini_config()
     if not api_key and gemini_call is None:
-        return fallback
+        logger.warning("gemini_call_skipped reason=no API key")
+        return _fallback("no API key", retrieved, target_track)
 
     prompt = _build_prompt(safe_profile, retrieved)
+    logger.info(
+        "gemini_call_started target_track=%s",
+        target_track or "unspecified",
+    )
     try:
         response_text = (
             gemini_call(prompt, model)
             if gemini_call is not None
             else _call_gemini(prompt, api_key, model)
         )
-        steps = _validate_response(response_text, retrieved)
     except Exception:
-        return fallback
+        logger.warning("gemini_call_failed reason=Gemini API error")
+        return _fallback("Gemini API error", retrieved, target_track)
+    logger.info("gemini_call_succeeded target_track=%s", target_track or "unspecified")
 
+    try:
+        steps = _validate_response(response_text, retrieved)
+    except AIOutputRejected as error:
+        logger.warning("ai_output_rejected reason=%s", error)
+        return _fallback(str(error), retrieved, target_track)
+    except Exception:
+        logger.warning("ai_output_rejected reason=invalid response structure")
+        return _fallback("invalid response structure", retrieved, target_track)
+
+    logger.info(
+        "ai_output_accepted target_track=%s reason=valid JSON and retrieved titles verified",
+        target_track or "unspecified",
+    )
     return {"source": GEMINI_SOURCE, "steps": steps}
