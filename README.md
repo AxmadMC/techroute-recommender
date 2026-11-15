@@ -328,3 +328,11 @@ The current [model_card.md](model_card.md) is still the Music Recommender starte
 ├── requirements.txt
 └── README.md
 ```
+
+## Author
+
+Ahmed Ali, Web Developer
+
+- Website: https://ahmedmc.com
+- GitHub: https://github.com/AxmadMC
+- LinkedIn: https://www.linkedin.com/in/ahmadmc/
