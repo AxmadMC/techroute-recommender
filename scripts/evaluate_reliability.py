@@ -25,6 +25,7 @@ from src.path_generator import (
     generate_learning_path,
     validate_profile,
 )
+from src.profiles import EVALUATION_PROFILE_NAMES, PROFILE_LABELS, PROFILE_PRESETS
 from src.recommender import load_opportunities, recommend_opportunities
 
 Profile = Dict[str, object]
@@ -35,66 +36,8 @@ CALL_PAUSE_SECONDS = 1.0
 REPORT_PATH = PROJECT_ROOT / "assets" / "evaluation_results.md"
 
 PROFILES: List[Tuple[str, Profile]] = [
-    (
-        "IT Support beginner",
-        {
-            "target_track": "it_support",
-            "preferred_format": "self_paced",
-            "skill_level": 0.2,
-            "prefers_free": True,
-            "needs_remote": True,
-            "max_hours": 10,
-            "interests": ["hardware", "troubleshooting", "windows"],
-        },
-    ),
-    (
-        "Networking student",
-        {
-            "target_track": "networking",
-            "preferred_format": "project_based",
-            "skill_level": 0.35,
-            "prefers_free": True,
-            "needs_remote": True,
-            "max_hours": 8,
-            "interests": ["networking", "ip_addressing", "packet_tracer"],
-        },
-    ),
-    (
-        "Cybersecurity beginner",
-        {
-            "target_track": "cybersecurity",
-            "preferred_format": "self_paced",
-            "skill_level": 0.2,
-            "prefers_free": True,
-            "needs_remote": True,
-            "max_hours": 5,
-            "interests": ["security_fundamentals", "linux", "networking"],
-        },
-    ),
-    (
-        "Cloud career changer",
-        {
-            "target_track": "cloud_computing",
-            "preferred_format": "self_paced",
-            "skill_level": 0.3,
-            "prefers_free": True,
-            "needs_remote": True,
-            "max_hours": 10,
-            "interests": ["azure", "cloud", "linux"],
-        },
-    ),
-    (
-        "AI Engineering student",
-        {
-            "target_track": "ai_engineering",
-            "preferred_format": "project_based",
-            "skill_level": 0.35,
-            "prefers_free": True,
-            "needs_remote": True,
-            "max_hours": 12,
-            "interests": ["python", "machine_learning", "data_analysis"],
-        },
-    ),
+    (PROFILE_LABELS[name], PROFILE_PRESETS[name])
+    for name in EVALUATION_PROFILE_NAMES
 ]
 
 
