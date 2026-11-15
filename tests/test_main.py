@@ -101,11 +101,16 @@ def test_no_options_uses_software_engineering_default_without_gemini(
     )
     captured_profile = {}
 
-    def fake_path_generator(profile, opportunities):
+    def fake_pipeline(profile, offline=False, dataset_path=None):
         captured_profile.update(profile)
-        return {"source": "test source", "steps": []}
+        return {
+            "recommendations": [],
+            "learning_path": {"steps": []},
+            "source_label": "test source",
+            "fallback_reason": None,
+        }
 
-    monkeypatch.setattr(app, "generate_learning_path", fake_path_generator)
+    monkeypatch.setattr(app, "run_pipeline", fake_pipeline)
 
     exit_code = app.main([])
     capsys.readouterr()

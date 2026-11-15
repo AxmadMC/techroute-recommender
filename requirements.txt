@@ -1,5 +1,6 @@
 pandas
 pytest
 streamlit
+fpdf2
 google-genai
 python-dotenv
