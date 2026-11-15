@@ -4,6 +4,8 @@ import argparse
 import csv
 import logging
 import sys
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from typing import List, Optional
 from unittest.mock import patch
@@ -57,8 +59,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger = configure_logging()
     logger.info("app_start")
 
+    print("Loading opportunities from data/opportunities.csv...")
     try:
-        opportunities = load_opportunities(str(DATASET_PATH))
+        with redirect_stdout(StringIO()):
+            opportunities = load_opportunities(str(DATASET_PATH))
     except (OSError, UnicodeError, csv.Error, ValueError) as error:
         reason = type(error).__name__
         logger.error("dataset_load_failed reason=%s", reason)

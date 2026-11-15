@@ -19,7 +19,7 @@ Input profile: {
 }
 
 ```text
-Loading opportunities from C:\Users\Amuse\OneDrive\Documents\GitHub\techroute-recommender-local\data\opportunities.csv...
+Loading opportunities from data/opportunities.csv...
 
 Top opportunities:
 
@@ -72,7 +72,7 @@ Input profile: {
 }
 
 ```text
-Loading opportunities from C:\Users\Amuse\OneDrive\Documents\GitHub\techroute-recommender-local\data\opportunities.csv...
+Loading opportunities from data/opportunities.csv...
 
 Top opportunities:
 
@@ -126,7 +126,7 @@ Input profile: {
 
 ```text
 2026-11-14 22:38:38 WARNING gemini_call_skipped reason=no API key
-Loading opportunities from C:\Users\Amuse\OneDrive\Documents\GitHub\techroute-recommender-local\data\opportunities.csv...
+Loading opportunities from data/opportunities.csv...
 
 Top opportunities:
 
