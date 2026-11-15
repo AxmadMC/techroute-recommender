@@ -7,11 +7,12 @@ def main() -> None:
     opportunities = load_opportunities("data/opportunities.csv")
 
     user_prefs = {
-        "career_track": "software_engineering",
-        "format": "self_paced",
+        "target_track": "software_engineering",
+        "preferred_format": "self_paced",
         "skill_level": 0.3,
+        "prefers_free": True,
+        "needs_remote": True,
         "max_hours": 20,
-        "remote": True,
         "interests": ["python", "git"],
     }
 
