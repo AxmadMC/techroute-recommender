@@ -1,0 +1,62 @@
+%% TechRoute Recommender architecture
+flowchart TD
+    subgraph Input["Input"]
+        student["Student preferences<br/>Learning only; no personal data or login"]
+        privacy["Privacy allowlist<br/>Drop unexpected keys"]
+        validation["Profile validation"]
+        student --> privacy --> validation
+    end
+
+    subgraph Retrieval["Retrieval"]
+        dataset["data/opportunities.csv"]
+        guardrails["Input guardrails<br/>Remote hard filter<br/>Prior experience penalty: minus 1.0"]
+        ranker["Scorer and ranker<br/>CLI top 5; RAG top 8 plus track internships and jobs"]
+        retrieved["Retrieved opportunity set"]
+        validation --> guardrails
+        dataset --> guardrails --> ranker --> retrieved
+    end
+
+    subgraph Generation["Generation"]
+        prompt["Gemini prompt<br/>Built from retrieved items only"]
+        gemini["Gemini response"]
+        retrieved --> prompt --> gemini
+    end
+
+    subgraph Verification["Verification"]
+        verifier["Output verifier<br/>Parse JSON; every title must match retrieved set"]
+        accepted["Accept verified path"]
+        fallback["Rule-based fallback<br/>Reason: no key, API error, rejected output, or offline mode"]
+        gemini --> verifier
+        retrieved --> verifier
+        verifier -->|"Verified"| accepted
+        verifier -->|"Rejected"| fallback
+        gemini -->|"API error"| fallback
+        retrieved -->|"No key or offline mode"| fallback
+    end
+
+    subgraph Output["Output"]
+        cli_output["Top recommendations plus four-stage path<br/>Source label included"]
+        logs["logs/techroute.log<br/>Operational events only; no key, full profile, or prompt"]
+        ranker --> cli_output
+        accepted --> cli_output
+        fallback --> cli_output
+    end
+
+    subgraph Testing_Human_Review["Testing & Human Review"]
+        pytest["pytest<br/>Gemini calls mocked"]
+        evaluation["scripts/evaluate_reliability.py<br/>Ranking, grounding, consistency, --offline"]
+        results["assets/evaluation_results.md"]
+        human_notes["assets/human_evaluation.md<br/>Planned; not present in repository"]
+        developer["Developer reviews results and curates dataset"]
+        student_review["Student reviews path and decides"]
+        pytest --> evaluation --> results
+        results --> human_notes
+        results -.-> developer
+    end
+
+    guardrails -.->|"Counts, track, and reasons only"| logs
+    gemini -.->|"Safe event details only"| logs
+    verifier -.->|"Acceptance or rejection reason"| logs
+    cli_output -.->|"Path for review"| student_review
+    student_review -.->|"Human feedback"| student
+    developer -.->|"Dataset curation"| dataset
