@@ -169,6 +169,31 @@ def check_no_invented_apply(
     )
 
 
+def check_apply_contains_retrieved_internship_job(
+    path: Dict[str, object], retrieved: List[Dict[str, object]]
+) -> Tuple[bool, str]:
+    internship_job_titles = {
+        item["title"]
+        for item in retrieved
+        if item.get("type") in {"internship", "job"}
+    }
+    if not internship_job_titles:
+        return True, "not applicable: no internship/job rows were retrieved"
+
+    apply_steps = [step for step in path["steps"] if step.get("stage") == "Apply"]
+    apply_titles = {
+        title
+        for step in apply_steps
+        for title in step.get("opportunity_titles", [])
+    }
+    included = sorted(internship_job_titles & apply_titles)
+    if included:
+        return True, f"Apply includes retrieved opportunity: {', '.join(included)}"
+    if not apply_steps:
+        return False, "Apply step is missing despite retrieved internship/job rows"
+    return False, "Apply step omits all retrieved internship/job rows"
+
+
 def check_source_label(path: Dict[str, object]) -> Tuple[bool, str]:
     source = path.get("source", "")
     valid_gemini = isinstance(source, str) and source.startswith(
@@ -190,6 +215,10 @@ PATH_CHECKS: List[Tuple[str, Check]] = [
     ("Grounding", check_grounding),
     ("Structure", check_structure),
     ("No invented opportunities", check_no_invented_apply),
+    (
+        "Apply step contains at least one retrieved internship/job",
+        check_apply_contains_retrieved_internship_job,
+    ),
     ("Source label", check_source_label),
 ]
 
@@ -281,7 +310,10 @@ def _run_profile(
             passed, detail = check(path, retrieved)
         elif check_name == "Structure":
             passed, detail = check(path)
-        elif check_name == "No invented opportunities":
+        elif check_name in {
+            "No invented opportunities",
+            "Apply step contains at least one retrieved internship/job",
+        }:
             passed, detail = check(path, retrieved)
         else:
             passed, detail = check(path)

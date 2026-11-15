@@ -122,6 +122,7 @@ def test_no_options_uses_software_engineering_default_without_gemini(
 
 def test_cli_and_evaluator_use_shared_profile_presets():
     assert app.PROFILE_PRESETS is PROFILE_PRESETS
+    assert set(EVALUATION_PROFILE_NAMES) == set(PROFILE_PRESETS)
     assert EVALUATION_PROFILES == [
         (PROFILE_LABELS[name], PROFILE_PRESETS[name])
         for name in EVALUATION_PROFILE_NAMES

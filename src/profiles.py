@@ -77,4 +77,5 @@ EVALUATION_PROFILE_NAMES: Tuple[str, ...] = (
     "cybersecurity_beginner",
     "cloud_career_changer",
     "ai_engineering_student",
+    "software_engineering_student",
 )
