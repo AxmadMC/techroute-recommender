@@ -1,31 +1,25 @@
-"""
-Command line runner for the Music Recommender Simulation.
+"""Command-line runner for the TechRoute Recommender."""
 
-This file helps you quickly run and test your recommender.
-
-You will implement the functions in recommender.py:
-- load_songs
-- score_song
-- recommend_songs
-"""
-
-from src.recommender import load_songs, recommend_songs
+from src.recommender import load_opportunities, recommend_opportunities
 
 
 def main() -> None:
-    songs = load_songs("data/songs.csv") 
+    opportunities = load_opportunities("data/opportunities.csv")
 
-    # Starter example profile
-    user_prefs = {"genre": "pop", "mood": "happy", "energy": 0.8}
+    user_prefs = {
+        "career_track": "software_engineering",
+        "format": "self_paced",
+        "skill_level": 0.3,
+        "max_hours": 20,
+        "remote": True,
+        "interests": ["python", "git"],
+    }
 
-    recommendations = recommend_songs(user_prefs, songs, k=5)
+    recommendations = recommend_opportunities(user_prefs, opportunities, k=5)
 
-    print("\nTop recommendations:\n")
-    for rec in recommendations:
-        # You decide the structure of each returned item.
-        # A common pattern is: (song, score, explanation)
-        song, score, explanation = rec
-        print(f"{song['title']} - Score: {score:.2f}")
+    print("\nTop opportunities:\n")
+    for opportunity, score, explanation in recommendations:
+        print(f"{opportunity['title']} - Score: {score:.2f}")
         print(f"Because: {explanation}")
         print()
 

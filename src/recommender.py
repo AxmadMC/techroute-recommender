@@ -1,78 +1,97 @@
 import csv
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, field
+from typing import Dict, List, Optional, Tuple
 
-# Scoring weights (Algorithm Recipe)
-GENRE_WEIGHT = 2.0
-MOOD_WEIGHT = 1.0
-ACOUSTIC_BONUS = 0.5
-ACOUSTIC_THRESHOLD = 0.5  # a song counts as "acoustic" if acousticness >= this
+TRACK_WEIGHT = 2.0
+FORMAT_WEIGHT = 1.0
+DIFFICULTY_WEIGHT = 1.0
+FREE_PRIORITY_WEIGHT = 1.0
+REMOTE_WEIGHT = 0.5
+TIME_WEIGHT = 0.5
+INTEREST_WEIGHT = 0.5
 
 NO_MATCH_EXPLANATION = "No strong matches with your preferences."
 
+
 @dataclass
-class Song:
-    """
-    Represents a song and its attributes.
-    Required by tests/test_recommender.py
-    """
+class Opportunity:
+    """Represents an opportunity and its attributes."""
+
     id: int
     title: str
-    artist: str
-    genre: str
-    mood: str
-    energy: float
-    tempo_bpm: float
-    valence: float
-    danceability: float
-    acousticness: float
+    provider: str
+    category: str
+    career_track: str
+    format: Optional[str]
+    difficulty: float
+    hours_required: Optional[float]
+    cost_type: str
+    cost_usd: float
+    remote: bool
+    career_value: float
+    skills: str
+    eligibility: Optional[str]
+    leads_to: str
+    description: str
+    url: str
+    last_verified: Optional[str]
+
 
 @dataclass
 class UserProfile:
-    """
-    Represents a user's taste preferences.
-    Required by tests/test_recommender.py
-    """
-    favorite_genre: str
-    favorite_mood: str
-    target_energy: float
-    likes_acoustic: bool
+    """Represents a user's technology career preferences."""
+
+    career_track: Optional[str] = None
+    preferred_format: Optional[str] = None
+    skill_level: float = 0.3
+    max_hours: Optional[float] = None
+    remote: Optional[bool] = None
+    interests: List[str] = field(default_factory=list)
+
 
 class Recommender:
-    """
-    OOP implementation of the recommendation logic.
-    Required by tests/test_recommender.py
-    """
-    def __init__(self, songs: List[Song]):
-        self.songs = songs
+    """OOP implementation of the recommendation logic."""
 
-    def recommend(self, user: UserProfile, k: int = 5) -> List[Song]:
-        """Returns the top k songs for the user, highest score first."""
+    def __init__(self, opportunities: List[Opportunity]):
+        self.opportunities = opportunities
+
+    def recommend(self, user: UserProfile, k: int = 5) -> List[Opportunity]:
+        """Returns the top k opportunities for the user, highest score first."""
         prefs = _profile_to_prefs(user)
         ranked = sorted(
-            self.songs,
-            key=lambda song: score_song(prefs, asdict(song))[0],
+            self.opportunities,
+            key=lambda opportunity: _rank_key(
+                score_opportunity(prefs, asdict(opportunity))[0],
+                asdict(opportunity),
+            ),
             reverse=True,
         )
         return ranked[:k]
 
-    def explain_recommendation(self, user: UserProfile, song: Song) -> str:
-        """Returns a human-readable explanation of why the song was scored as it was."""
-        _, reasons = score_song(_profile_to_prefs(user), asdict(song))
+    def explain_recommendation(
+        self, user: UserProfile, opportunity: Opportunity
+    ) -> str:
+        """Explains why an opportunity was scored as it was."""
+        _, reasons = score_opportunity(_profile_to_prefs(user), asdict(opportunity))
         return _build_explanation(reasons)
 
+
 def _profile_to_prefs(user: UserProfile) -> Dict:
-    """Converts a UserProfile into the user_prefs dict used by score_song."""
+    """Converts a UserProfile into the user_prefs dict used by score_opportunity."""
     return {
-        "genre": user.favorite_genre,
-        "mood": user.favorite_mood,
-        "energy": user.target_energy,
-        "likes_acoustic": user.likes_acoustic,
+        "career_track": user.career_track,
+        "format": user.preferred_format,
+        "skill_level": user.skill_level,
+        "max_hours": user.max_hours,
+        "remote": user.remote,
+        "interests": user.interests,
     }
+
 
 def _normalize(value: Optional[str]) -> str:
     """Lowercases and strips a string so comparisons ignore case and whitespace."""
     return (value or "").strip().lower()
+
 
 def _build_explanation(reasons: List[str]) -> str:
     """Joins scoring reasons into a single explanation string."""
@@ -80,62 +99,125 @@ def _build_explanation(reasons: List[str]) -> str:
         return NO_MATCH_EXPLANATION
     return "; ".join(reasons)
 
-def load_songs(csv_path: str) -> List[Dict]:
-    """
-    Loads songs from a CSV file.
-    Required by src/main.py
-    """
-    print(f"Loading songs from {csv_path}...")
-    float_fields = ["energy", "tempo_bpm", "valence", "danceability", "acousticness"]
-    songs = []
+
+def _rank_key(score: float, opportunity: Dict) -> Tuple[float, int, float, int]:
+    cost_rank = {"free": 2, "freemium": 1, "paid": 0}
+    return (
+        score,
+        cost_rank.get(opportunity.get("cost_type"), 0),
+        opportunity.get("career_value") or 0.0,
+        -(opportunity.get("id") or 0),
+    )
+
+
+def load_opportunities(csv_path: str) -> List[Dict]:
+    """Loads opportunities from a CSV file."""
+    print(f"Loading opportunities from {csv_path}...")
+    opportunities = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             row["id"] = int(row["id"])
-            for field in float_fields:
-                row[field] = float(row[field])
-            songs.append(row)
-    return songs
+            for field_name in ("difficulty", "cost_usd", "career_value"):
+                row[field_name] = float(row[field_name])
+            row["hours_required"] = (
+                float(row["hours_required"]) if row["hours_required"] else None
+            )
+            remote_value = row["remote"].strip().lower()
+            if remote_value not in {"true", "false"}:
+                raise ValueError(
+                    f"Invalid remote value for opportunity {row['id']}: "
+                    f"{row['remote']!r}"
+                )
+            row["remote"] = remote_value == "true"
+            for field_name in ("format", "eligibility", "last_verified"):
+                row[field_name] = row[field_name] or None
+            opportunities.append(row)
+    return opportunities
 
-def score_song(user_prefs: Dict, song: Dict) -> Tuple[float, List[str]]:
-    """
-    Scores a single song against user preferences.
-    Required by recommend_songs() and src/main.py
-    """
+
+def score_opportunity(
+    user_prefs: Dict, opportunity: Dict
+) -> Tuple[float, List[str]]:
+    """Scores one opportunity against a user's career preferences."""
     score = 0.0
     reasons: List[str] = []
 
-    genre = user_prefs.get("genre")
-    if genre and _normalize(genre) == _normalize(song.get("genre")):
-        score += GENRE_WEIGHT
-        reasons.append(f"genre matches '{song['genre']}' (+{GENRE_WEIGHT:.2f})")
+    career_track = user_prefs.get("career_track")
+    if career_track:
+        opportunity_track = _normalize(opportunity.get("career_track"))
+        if _normalize(career_track) == opportunity_track:
+            track_match = 1.0
+        elif opportunity_track == "general":
+            track_match = 0.5
+        else:
+            track_match = 0.0
+        if track_match:
+            points = TRACK_WEIGHT * track_match
+            score += points
+            reasons.append(f"career track match (+{points:.2f})")
 
-    mood = user_prefs.get("mood")
-    if mood and _normalize(mood) == _normalize(song.get("mood")):
-        score += MOOD_WEIGHT
-        reasons.append(f"mood matches '{song['mood']}' (+{MOOD_WEIGHT:.2f})")
+    preferred_format = user_prefs.get("format")
+    opportunity_format = opportunity.get("format")
+    if preferred_format and opportunity_format:
+        if _normalize(preferred_format) == _normalize(opportunity_format):
+            score += FORMAT_WEIGHT
+            reasons.append(f"format matches '{opportunity_format}' (+{FORMAT_WEIGHT:.2f})")
 
-    target_energy = user_prefs.get("energy")
-    if target_energy is not None and song.get("energy") is not None:
-        similarity = 1 - abs(target_energy - song["energy"])
-        score += similarity
-        reasons.append(
-            f"energy {song['energy']:.2f} is close to your target {target_energy:.2f} (+{similarity:.2f})"
-        )
+    skill_level = user_prefs.get("skill_level")
+    difficulty = opportunity.get("difficulty")
+    if skill_level is not None and difficulty is not None:
+        similarity = 1 - abs(skill_level - difficulty)
+        score += DIFFICULTY_WEIGHT * similarity
+        reasons.append(f"difficulty fit (+{DIFFICULTY_WEIGHT * similarity:.2f})")
 
-    if user_prefs.get("likes_acoustic") and song.get("acousticness", 0) >= ACOUSTIC_THRESHOLD:
-        score += ACOUSTIC_BONUS
-        reasons.append(f"acoustic sound you prefer (+{ACOUSTIC_BONUS:.2f})")
+    free_priority = {"free": 1.0, "freemium": 0.5, "paid": 0.0}.get(
+        opportunity.get("cost_type"), 0.0
+    )
+    score += FREE_PRIORITY_WEIGHT * free_priority
+    if free_priority:
+        reasons.append(f"free priority (+{FREE_PRIORITY_WEIGHT * free_priority:.2f})")
+
+    preferred_remote = user_prefs.get("remote")
+    opportunity_remote = opportunity.get("remote")
+    if preferred_remote is not None and opportunity_remote is not None:
+        if preferred_remote == opportunity_remote:
+            score += REMOTE_WEIGHT
+            reasons.append(f"remote preference match (+{REMOTE_WEIGHT:.2f})")
+
+    max_hours = user_prefs.get("max_hours")
+    hours_required = opportunity.get("hours_required")
+    if max_hours is not None and hours_required is not None and hours_required > 0:
+        time_fit = min(1.0, max_hours / hours_required)
+        score += TIME_WEIGHT * time_fit
+        reasons.append(f"time fit (+{TIME_WEIGHT * time_fit:.2f})")
+
+    interests = {
+        _normalize(interest)
+        for interest in user_prefs.get("interests", [])
+        if _normalize(interest)
+    }
+    skills = {
+        _normalize(skill)
+        for skill in (opportunity.get("skills") or "").split(";")
+        if _normalize(skill)
+    }
+    if interests:
+        interest_overlap = len(interests & skills) / len(interests)
+        if interest_overlap:
+            points = INTEREST_WEIGHT * interest_overlap
+            score += points
+            reasons.append(f"interest overlap (+{points:.2f})")
 
     return score, reasons
 
-def recommend_songs(user_prefs: Dict, songs: List[Dict], k: int = 5) -> List[Tuple[Dict, float, str]]:
-    """
-    Functional implementation of the recommendation logic.
-    Required by src/main.py
-    """
+
+def recommend_opportunities(
+    user_prefs: Dict, opportunities: List[Dict], k: int = 5
+) -> List[Tuple[Dict, float, str]]:
+    """Returns the top k opportunities with their scores and explanations."""
     scored = []
-    for song in songs:
-        score, reasons = score_song(user_prefs, song)
-        scored.append((song, score, _build_explanation(reasons)))
-    scored.sort(key=lambda item: item[1], reverse=True)
+    for opportunity in opportunities:
+        score, reasons = score_opportunity(user_prefs, opportunity)
+        scored.append((opportunity, score, _build_explanation(reasons)))
+    scored.sort(key=lambda item: _rank_key(item[1], item[0]), reverse=True)
     return scored[:k]
