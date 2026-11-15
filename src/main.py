@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from src.logging_config import configure_logging
+from src.path_generator import format_agent_trace
 from src.pipeline import PipelineValidationError, run_pipeline
 from src.profiles import DEFAULT_PROFILE_NAME, PROFILE_PRESETS
 
@@ -32,6 +33,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--list-profiles",
         action="store_true",
         help="Print available preset profile names and exit.",
+    )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Print the learning-path agent trace after the path.",
     )
     args = parser.parse_args(argv)
 
@@ -92,6 +98,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if step["opportunity_titles"]:
             print(f"   Opportunities: {', '.join(step['opportunity_titles'])}")
         print(f"   Why: {step['why']}")
+    if args.trace:
+        print("\nAgent trace:")
+        for line in format_agent_trace(learning_path.get("trace", [])):
+            print(line)
     return 0
 
 

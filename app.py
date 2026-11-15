@@ -14,8 +14,8 @@ from src.logging_config import configure_logging
 from src.path_generator import (
     ALLOWED_FORMATS,
     ALLOWED_TRACKS,
-    GEMINI_SOURCE,
     _load_gemini_config,
+    format_agent_trace,
 )
 from src.pipeline import (
     DATASET_PATH,
@@ -294,10 +294,14 @@ with path_tab:
         st.write("Choose your preferences and select **Find my route** to begin.")
     else:
         source_label = result["source_label"]
-        if source_label.startswith(GEMINI_SOURCE):
+        if source_label.startswith("Source: Gemini (verified"):
+            verification = (
+                source_label.removeprefix("Source: Gemini (")
+                .removesuffix(")")
+            )
             st.markdown(
                 '<p class="techroute-verified">✓ AI-generated '
-                '(verified against retrieved data)</p>',
+                f"({escape(verification)})</p>",
                 unsafe_allow_html=True,
             )
         else:
@@ -330,6 +334,16 @@ with path_tab:
                     st.write("No retrieved opportunities were assigned to this stage.")
                 st.markdown("**Why**")
                 st.write(step["why"])
+
+        with st.expander("How the AI built this path"):
+            trace_lines = format_agent_trace(
+                result["learning_path"].get("trace", [])
+            )
+            if trace_lines:
+                for line in trace_lines:
+                    st.write(line)
+            else:
+                st.write("No agent trace is available for this route.")
 
 with recommendations_tab:
     result = st.session_state.get("route_result")

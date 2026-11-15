@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.pdf_export import build_pdf
+from src.pdf_export import _source_text, build_pdf
 
 
 def sample_profile():
@@ -71,6 +71,13 @@ def sample_path():
             },
         ]
     }
+
+
+def test_pdf_source_label_preserves_self_correction_count():
+    assert _source_text(
+        "Source: Gemini (verified after 1 self-correction)",
+        None,
+    ) == "AI-generated (verified after 1 self-correction)"
 
 
 @pytest.mark.parametrize(

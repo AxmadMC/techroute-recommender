@@ -6,10 +6,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TypedDict
-from unittest.mock import patch
 
 from src.path_generator import (
-    DEFAULT_MODEL,
     FALLBACK_SOURCE,
     generate_learning_path,
     validate_profile,
@@ -67,15 +65,11 @@ def run_pipeline(
     recommendations = recommend_opportunities(
         safe_profile, opportunities, k=5
     )
-    if offline:
-        with patch(
-            "src.path_generator._load_gemini_config",
-            return_value=(None, DEFAULT_MODEL),
-        ):
-            learning_path = generate_learning_path(safe_profile, opportunities)
-        learning_path["source"] = f"{FALLBACK_SOURCE} (reason: offline mode)"
-    else:
-        learning_path = generate_learning_path(safe_profile, opportunities)
+    learning_path = generate_learning_path(
+        safe_profile,
+        opportunities,
+        offline=offline,
+    )
 
     source_label = str(learning_path["source"])
     fallback_reason = None

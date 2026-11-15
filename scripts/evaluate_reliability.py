@@ -10,16 +10,13 @@ from pathlib import Path
 import sys
 import time
 from typing import Callable, Dict, List, Optional, Tuple
-from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.path_generator import (
-    DEFAULT_MODEL,
     FALLBACK_SOURCE,
-    GEMINI_SOURCE,
     _load_gemini_config,
     _retrieve_opportunities,
     generate_learning_path,
@@ -196,13 +193,49 @@ def check_apply_contains_retrieved_internship_job(
 
 def check_source_label(path: Dict[str, object]) -> Tuple[bool, str]:
     source = path.get("source", "")
-    valid_gemini = isinstance(source, str) and source.startswith(
-        "Source: Gemini (verified"
-    )
+    valid_gemini = is_gemini_source(path)
     valid_fallback = isinstance(source, str) and source.startswith(
         f"{FALLBACK_SOURCE} (reason: "
     )
     return valid_gemini or valid_fallback, str(source)
+
+
+def is_gemini_source(path: Dict[str, object]) -> bool:
+    source = path.get("source", "")
+    return isinstance(source, str) and source.startswith(
+        "Source: Gemini (verified"
+    )
+
+
+def check_agent_stage_size(path: Dict[str, object]) -> Tuple[bool, str]:
+    oversized = [
+        f"{step.get('stage', 'Unknown')}={len(step.get('opportunity_titles', []))}"
+        for step in path["steps"]
+        if len(step.get("opportunity_titles", [])) > 3
+    ]
+    return not oversized, (
+        "all stages contain at most 3 opportunities"
+        if not oversized
+        else f"stage sizes exceed 3: {', '.join(oversized)}"
+    )
+
+
+def check_agent_duplicate_titles(path: Dict[str, object]) -> Tuple[bool, str]:
+    title_stages: Dict[str, str] = {}
+    duplicates = []
+    for step in path["steps"]:
+        stage = step.get("stage", "Unknown")
+        for title in step.get("opportunity_titles", []):
+            previous_stage = title_stages.get(title)
+            if previous_stage is not None and previous_stage != stage:
+                duplicates.append(f"{title} ({previous_stage}, {stage})")
+            else:
+                title_stages[title] = stage
+    return not duplicates, (
+        "no opportunity title appears across multiple stages"
+        if not duplicates
+        else f"duplicate titles across stages: {', '.join(duplicates)}"
+    )
 
 
 RANKING_CHECKS: List[Tuple[str, Check]] = [
@@ -220,6 +253,8 @@ PATH_CHECKS: List[Tuple[str, Check]] = [
         check_apply_contains_retrieved_internship_job,
     ),
     ("Source label", check_source_label),
+    ("Agent: stage size <= 3", check_agent_stage_size),
+    ("Agent: no duplicate titles", check_agent_duplicate_titles),
 ]
 
 
@@ -283,20 +318,18 @@ def _run_profile(
 
     retrieved = _retrieve_opportunities(safe_profile, opportunities)
     lines.append(f"Retrieved opportunities for path generation: {len(retrieved)}")
-    if offline:
-        with patch(
-            "src.path_generator._load_gemini_config",
-            return_value=(None, DEFAULT_MODEL),
-        ):
-            path = generate_learning_path(safe_profile, opportunities)
-        path["source"] = f"{FALLBACK_SOURCE} (reason: offline mode)"
-    else:
+    if not offline:
         pacer.before_call()
-        path = generate_learning_path(safe_profile, opportunities)
+    path = generate_learning_path(
+        safe_profile,
+        opportunities,
+        offline=offline,
+    )
 
     source = path["source"]
-    path_sources["Gemini" if source == GEMINI_SOURCE else "fallback"] += 1
+    path_sources["Gemini" if is_gemini_source(path) else "fallback"] += 1
     lines.append(str(source))
+    lines.append(f"Agent repair attempts used: {path.get('repair_attempts', 0)}")
     for step in path["steps"]:
         lines.append(f"{step['step_number']}. {step['stage']}: {step['goal']}")
         if step["opportunity_titles"]:
@@ -436,14 +469,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         pacer.before_call()
         second_cloud_path = generate_learning_path(cloud_profile, opportunities)
         path_sources[
-            "Gemini"
-            if second_cloud_path["source"] == GEMINI_SOURCE
-            else "fallback"
+            "Gemini" if is_gemini_source(second_cloud_path) else "fallback"
         ] += 1
         first_cloud_path = profile_paths[cloud_name]
         if (
-            first_cloud_path["source"] == GEMINI_SOURCE
-            and second_cloud_path["source"] == GEMINI_SOURCE
+            is_gemini_source(first_cloud_path)
+            and is_gemini_source(second_cloud_path)
         ):
             consistency_overlap = _title_overlap(
                 first_cloud_path, second_cloud_path
@@ -473,6 +504,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 consistency_result.removeprefix("FAIL: "),
             )
         lines.append(f"Second run source: {second_cloud_path['source']}")
+        lines.append(
+            "Consistency run repair attempts used: "
+            f"{second_cloud_path.get('repair_attempts', 0)}"
+        )
         lines.append(f"Consistency overlap: {consistency_result}")
 
     failed = counts["total"] - counts["passed"]

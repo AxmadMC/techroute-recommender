@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import re
+import time
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -18,6 +19,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 GEMINI_SOURCE = "Source: Gemini (verified against retrieved data)"
 FALLBACK_SOURCE = "Source: rule-based fallback"
+EXPECTED_STAGES = ("Foundations", "Build Skills", "Prove Skills", "Apply")
+MAX_STAGE_OPPORTUNITIES = 3
+MAX_REPAIR_ATTEMPTS = 2
+GEMINI_CALL_PAUSE_SECONDS = 1.0
 
 ALLOWED_TRACKS = {
     "it_support",
@@ -58,6 +63,10 @@ logger = logging.getLogger("techroute")
 
 class AIOutputRejected(ValueError):
     """AI output failed a source-data or response-shape check."""
+
+    def __init__(self, errors):
+        self.errors = [errors] if isinstance(errors, str) else list(errors)
+        super().__init__("; ".join(self.errors))
 
 
 def validate_profile(profile: Dict) -> Dict[str, object]:
@@ -192,7 +201,9 @@ def _retrieve_opportunities(
 
 
 def _build_prompt(
-    profile: Dict[str, object], retrieved: List[Dict[str, object]]
+    profile: Dict[str, object],
+    retrieved: List[Dict[str, object]],
+    plan: List[Dict[str, str]],
 ) -> str:
     prompt_opportunities = [
         {key: item[key] for key in PROMPT_FIELDS}
@@ -207,21 +218,63 @@ def _build_prompt(
             "that no internship or job opportunities are in the dataset yet."
         )
     )
-    return (
-        "Create a practical beginner-aware technology learning path. Return only "
-        "valid JSON as an array of steps. Every step must have exactly these keys: "
-        "step_number (integer), stage (one of Foundations, Build Skills, "
-        "Prove Skills, Apply), goal (string), opportunity_titles (array of exact "
-        "titles), and why (string). Use ONLY the opportunities in the retrieved "
-        "list. Never invent or recommend courses, projects, certifications, URLs, "
-        "internships, or jobs. Each opportunity_titles entry must exactly match a "
-        "retrieved title. Keep goals and reasons general; reference specific "
-        "resources only by listing their retrieved titles. "
-        f"{apply_instruction}\n\n"
-        "Student learning preferences (the complete allowlisted profile):\n"
-        f"{json.dumps(profile, sort_keys=True)}\n\n"
-        "Retrieved opportunities (the only allowed resources):\n"
-        f"{json.dumps(prompt_opportunities, sort_keys=True)}"
+    return GENERATE_PROMPT_TEMPLATE.format(
+        apply_instruction=apply_instruction,
+        profile_json=json.dumps(profile, sort_keys=True),
+        plan_json=json.dumps(plan, sort_keys=True),
+        retrieved_json=json.dumps(prompt_opportunities, sort_keys=True),
+    )
+
+
+PLAN_PROMPT_TEMPLATE = """Create a short plan for a technology learning path. Return only valid JSON with one top-level "assignments" array. Each assignment must have exactly these keys: "title" (an exact retrieved title), "stage" (one of Foundations, Build Skills, Prove Skills, Apply), and "reason" (one concise sentence explaining the choice using learning preferences or opportunity type). Assign each retrieved opportunity at most once. Put internships and jobs in Apply when present. Do not invent titles or include any other fields.
+
+Student learning preferences:
+{profile_json}
+
+Retrieved opportunities (the only allowed resources):
+{retrieved_json}"""
+
+GENERATE_PROMPT_TEMPLATE = """Create a practical beginner-aware technology learning path using the plan as guidance. Return only valid JSON as an array of exactly four steps in this order: Foundations, Build Skills, Prove Skills, Apply. Every step must have exactly these keys: step_number (integer, 1 through 4), stage (string), goal (string), opportunity_titles (array of exact titles), and why (string). Use ONLY the retrieved opportunities; never invent or recommend resources, certifications, URLs, internships, or jobs. Each title may appear in only one stage, and each stage may contain at most 3 opportunities. Keep goals and reasons general; refer to specific resources only by listing their retrieved titles. {apply_instruction}
+
+Student learning preferences:
+{profile_json}
+
+Agent plan:
+{plan_json}
+
+Retrieved opportunities (the only allowed resources):
+{retrieved_json}"""
+
+REPAIR_PROMPT_TEMPLATE = """Correct the previous learning path so it passes every verifier check. Return only valid JSON as an array of exactly four steps in this order: Foundations, Build Skills, Prove Skills, Apply. Every step must have exactly these keys: step_number (integer, 1 through 4), stage (string), goal (string), opportunity_titles (array of exact titles), and why (string). Use ONLY the retrieved opportunities. Do not repeat a title across stages, and include at most 3 opportunities per stage. Address every verifier error listed below; keep the Apply step consistent with the retrieved internship/job data.
+
+Verifier errors:
+{errors_json}
+
+Previous path output:
+{previous_output}
+
+Student learning preferences:
+{profile_json}
+
+Agent plan:
+{plan_json}
+
+Retrieved opportunities (the only allowed resources):
+{retrieved_json}"""
+
+
+def _prompt_opportunities(
+    retrieved: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    return [{key: item[key] for key in PROMPT_FIELDS} for item in retrieved]
+
+
+def _build_plan_prompt(
+    profile: Dict[str, object], retrieved: List[Dict[str, object]]
+) -> str:
+    return PLAN_PROMPT_TEMPLATE.format(
+        profile_json=json.dumps(profile, sort_keys=True),
+        retrieved_json=json.dumps(_prompt_opportunities(retrieved), sort_keys=True),
     )
 
 
@@ -240,9 +293,60 @@ def _call_gemini(prompt: str, api_key: str, model: str) -> str:
     return response.output_text
 
 
+def _validate_plan(
+    response_text: str, retrieved: List[Dict[str, object]]
+) -> List[Dict[str, str]]:
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError as error:
+        raise AIOutputRejected("invalid plan JSON") from error
+    if not isinstance(parsed, dict) or set(parsed) != {"assignments"}:
+        raise AIOutputRejected("invalid plan structure")
+    assignments = parsed["assignments"]
+    if not isinstance(assignments, list):
+        raise AIOutputRejected("invalid plan assignments")
+
+    retrieved_titles = {item["title"] for item in retrieved}
+    validated = []
+    errors = []
+    seen_titles = set()
+    expected_keys = {"title", "stage", "reason"}
+    for assignment in assignments:
+        if not isinstance(assignment, dict) or set(assignment) != expected_keys:
+            errors.append("invalid plan assignment structure")
+            continue
+        title = assignment["title"]
+        stage = assignment["stage"]
+        reason = assignment["reason"]
+        if not isinstance(title, str) or title not in retrieved_titles:
+            errors.append("plan referenced a non-retrieved opportunity")
+            continue
+        if title in seen_titles:
+            errors.append("plan assigned an opportunity more than once")
+            continue
+        if not isinstance(stage, str) or stage not in EXPECTED_STAGES:
+            errors.append("plan used an invalid stage")
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append("plan assignment omitted its reason")
+            continue
+        if "\n" in reason or "\r" in reason:
+            errors.append("plan assignment reason must be one line")
+            continue
+        seen_titles.add(title)
+        validated.append(
+            {"title": title, "stage": stage, "reason": reason.strip()}
+        )
+    if errors:
+        raise AIOutputRejected(errors)
+    return validated
+
+
 def _validate_response(
     response_text: str, retrieved: List[Dict[str, object]]
 ) -> List[Dict[str, object]]:
+    if not isinstance(response_text, str):
+        raise AIOutputRejected("invalid JSON")
     try:
         parsed = json.loads(response_text)
     except json.JSONDecodeError as error:
@@ -257,6 +361,7 @@ def _validate_response(
         if item["type"] in INTERNSHIP_TYPES
     }
     validated = []
+    errors = []
     expected_keys = {
         "step_number",
         "stage",
@@ -267,38 +372,77 @@ def _validate_response(
 
     for index, step in enumerate(parsed, start=1):
         if not isinstance(step, dict) or set(step) != expected_keys:
-            raise AIOutputRejected("invalid response structure")
+            errors.append("invalid response structure")
+            continue
         if (
             type(step["step_number"]) is not int
             or step["step_number"] != index
             or not isinstance(step["stage"], str)
             or step["stage"] not in ALLOWED_STAGES
         ):
-            raise AIOutputRejected("invalid step number or stage")
+            errors.append("invalid step number or stage")
         if not isinstance(step["goal"], str) or not step["goal"].strip():
-            raise AIOutputRejected("missing step goal")
+            errors.append("missing step goal")
         if not isinstance(step["why"], str) or not step["why"].strip():
-            raise AIOutputRejected("missing step reason")
+            errors.append("missing step reason")
         titles = step["opportunity_titles"]
         if not isinstance(titles, list):
-            raise AIOutputRejected("invalid opportunity title list")
-        if any(not isinstance(title, str) or title not in allowed_titles for title in titles):
-            raise AIOutputRejected(
-                "AI output referenced an opportunity not in the retrieved data"
+            errors.append("invalid opportunity title list")
+            titles = []
+            validated_step = {**step, "opportunity_titles": titles}
+        else:
+            validated_step = step
+        if len(titles) > MAX_STAGE_OPPORTUNITIES:
+            stage = step["stage"] if isinstance(step["stage"], str) else "Unknown"
+            errors.append(
+                f"{stage} has {len(titles)} items; maximum is "
+                f"{MAX_STAGE_OPPORTUNITIES}"
             )
+        for title in titles:
+            if not isinstance(title, str) or title not in allowed_titles:
+                errors.append(
+                    "AI output referenced an opportunity not in the retrieved data"
+                )
+                continue
+            previous_stage = next(
+                (
+                    existing["stage"]
+                    for existing in validated
+                    if title in existing["opportunity_titles"]
+                ),
+                None,
+            )
+            if previous_stage is not None and previous_stage != step["stage"]:
+                errors.append(
+                    f"{title} appears in both {previous_stage} and {step['stage']}"
+                )
         if step["stage"] == "Apply":
-            if apply_titles and not set(titles).intersection(apply_titles):
-                raise AIOutputRejected("Apply step omitted retrieved internship/job")
+            valid_titles = {
+                title for title in titles if isinstance(title, str)
+            }
+            if apply_titles and not valid_titles.intersection(apply_titles):
+                errors.append("Apply step omitted retrieved internship/job")
             if not apply_titles:
-                text = f"{step['goal']} {step['why']}".lower()
+                text = (
+                    f"{step.get('goal', '')} {step.get('why', '')}"
+                ).lower()
                 if titles or "dataset" not in text or not (
                     "no " in text or "none" in text
                 ):
-                    raise AIOutputRejected("Apply step omitted no-items notice")
-        validated.append(step)
+                    errors.append("Apply step omitted no-items notice")
+        validated.append(validated_step)
 
-    if not any(step["stage"] == "Apply" for step in validated):
-        raise AIOutputRejected("missing Apply step")
+    actual_stages = [
+        step["stage"]
+        for step in validated
+        if isinstance(step.get("stage"), str)
+    ]
+    if actual_stages != list(EXPECTED_STAGES):
+        errors.append("path must contain exactly the 4 stages in order")
+    if not any(step.get("stage") == "Apply" for step in validated):
+        errors.append("missing Apply step")
+    if errors:
+        raise AIOutputRejected(list(dict.fromkeys(errors)))
     return validated
 
 
@@ -354,35 +498,39 @@ def _fallback_path(retrieved: List[Dict[str, object]]) -> List[Dict[str, object]
             "step_number": 1,
             "stage": "Foundations",
             "goal": "Build foundational knowledge from retrieved learning resources.",
-            "opportunity_titles": foundations,
+            "opportunity_titles": foundations[:MAX_STAGE_OPPORTUNITIES],
             "why": "Begin with courses and other foundational learning resources.",
         },
         {
             "step_number": 2,
             "stage": "Build Skills",
             "goal": "Practice with retrieved tools and hands-on labs.",
-            "opportunity_titles": build_skills,
+            "opportunity_titles": build_skills[:MAX_STAGE_OPPORTUNITIES],
             "why": "These retrieved resources provide practical tool or lab experience.",
         },
         {
             "step_number": 3,
             "stage": "Prove Skills",
             "goal": "Demonstrate skills with retrieved projects and credentials.",
-            "opportunity_titles": prove_skills,
+            "opportunity_titles": prove_skills[:MAX_STAGE_OPPORTUNITIES],
             "why": "Projects, certifications, and contributions can demonstrate progress.",
         },
         {
             "step_number": 4,
             "stage": "Apply",
             "goal": apply_goal,
-            "opportunity_titles": apply_titles,
+            "opportunity_titles": apply_titles[:MAX_STAGE_OPPORTUNITIES],
             "why": apply_why,
         },
     ]
 
 
 def _fallback(
-    reason: str, retrieved: List[Dict[str, object]], target_track: Optional[str]
+    reason: str,
+    retrieved: List[Dict[str, object]],
+    target_track: Optional[str],
+    trace: Optional[List[Dict[str, object]]] = None,
+    repair_attempts: int = 0,
 ) -> LearningPath:
     logger.info(
         "fallback_used target_track=%s reason=%s",
@@ -392,48 +540,391 @@ def _fallback(
     return {
         "source": f"{FALLBACK_SOURCE} (reason: {reason})",
         "steps": _fallback_path(retrieved),
+        "trace": trace or [],
+        "repair_attempts": repair_attempts,
     }
 
 
+def _trace_entry(
+    step_name: str,
+    attempt_number: int,
+    decision: str,
+    verifier_errors: Optional[List[str]] = None,
+    **details,
+) -> Dict[str, object]:
+    return {
+        "step_name": step_name,
+        "attempt_number": attempt_number,
+        "decision": decision,
+        "verifier_errors": verifier_errors or [],
+        **details,
+    }
+
+
+def _redact_trace(
+    trace: List[Dict[str, object]], api_key: Optional[str]
+) -> List[Dict[str, object]]:
+    if not api_key:
+        return trace
+
+    def redact(value):
+        if isinstance(value, str):
+            return value.replace(api_key, "[redacted]")
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items()}
+        return value
+
+    return redact(trace)
+
+
+def format_agent_trace(trace: List[Dict[str, object]]) -> List[str]:
+    """Format trace records as concise, plain-language lines."""
+    lines = []
+    for entry in trace:
+        step_name = str(entry.get("step_name", "Step"))
+        attempt = entry.get("attempt_number", "n/a")
+        decision = str(entry.get("decision", "recorded")).replace("_", " ")
+        detail = entry.get("detail")
+        line = f"{step_name} (attempt {attempt}): {decision}"
+        if detail:
+            line += f" - {detail}"
+        lines.append(line)
+        for assignment in entry.get("plan", []):
+            lines.append(
+                f"  {assignment['title']} -> {assignment['stage']}: "
+                f"{assignment['reason']}"
+            )
+        for error in entry.get("verifier_errors", []):
+            lines.append(f"  Verifier: {error}")
+    return lines
+
+
 def generate_learning_path(
-    profile: Dict, opportunities: List[Dict], gemini_call: Optional[GeminiCall] = None
+    profile: Dict,
+    opportunities: List[Dict],
+    gemini_call: Optional[GeminiCall] = None,
+    offline: bool = False,
 ) -> LearningPath:
     """Generate a verified Gemini path or a deterministic retrieved-data fallback."""
     safe_profile = validate_profile(profile)
     retrieved = _retrieve_opportunities(safe_profile, opportunities)
     target_track = safe_profile.get("target_track")
+    trace: List[Dict[str, object]] = []
+    if offline:
+        trace.append(
+            _trace_entry(
+                "PLAN",
+                1,
+                "skipped",
+                detail="Offline mode does not plan or call Gemini.",
+            )
+        )
+        trace.append(
+            _trace_entry(
+                "DECIDE",
+                1,
+                "fallback",
+                detail="Rule-based fallback selected: offline mode.",
+            )
+        )
+        return _fallback("offline mode", retrieved, target_track, trace)
+
     api_key, model = _load_gemini_config()
     if not api_key and gemini_call is None:
         logger.warning("gemini_call_skipped reason=no API key")
-        return _fallback("no API key", retrieved, target_track)
+        trace.extend(
+            [
+                _trace_entry(
+                    "PLAN",
+                    1,
+                    "skipped",
+                    detail="AI unavailable because no API key is configured.",
+                ),
+                _trace_entry(
+                    "DECIDE",
+                    1,
+                    "fallback",
+                    detail="Rule-based fallback selected: no API key.",
+                ),
+            ]
+        )
+        return _fallback("no API key", retrieved, target_track, trace)
 
-    prompt = _build_prompt(safe_profile, retrieved)
+    call_count = 0
+
+    def call_model(prompt: str) -> str:
+        nonlocal call_count
+        if gemini_call is None and call_count:
+            time.sleep(GEMINI_CALL_PAUSE_SECONDS)
+        call_count += 1
+        if gemini_call is not None:
+            return gemini_call(prompt, model)
+        return _call_gemini(prompt, api_key, model)
+
     logger.info(
         "gemini_call_started target_track=%s",
         target_track or "unspecified",
     )
     try:
-        response_text = (
-            gemini_call(prompt, model)
-            if gemini_call is not None
-            else _call_gemini(prompt, api_key, model)
+        plan_response = call_model(_build_plan_prompt(safe_profile, retrieved))
+        plan = _validate_plan(plan_response, retrieved)
+        trace.append(
+            _trace_entry(
+                "PLAN",
+                1,
+                "accepted",
+                detail=f"Created a plan for {len(plan)} retrieved opportunities.",
+                plan=plan,
+            )
+        )
+    except AIOutputRejected as error:
+        trace.extend(
+            [
+                _trace_entry(
+                    "PLAN",
+                    1,
+                    "rejected",
+                    verifier_errors=error.errors,
+                ),
+                _trace_entry(
+                    "DECIDE",
+                    1,
+                    "fallback",
+                    detail="Rule-based fallback selected: AI plan failed verification.",
+                ),
+            ]
+        )
+        logger.warning("ai_plan_rejected verifier_error_count=%d", len(error.errors))
+        return _fallback(
+            "AI plan failed verification",
+            retrieved,
+            target_track,
+            _redact_trace(trace, api_key),
         )
     except Exception:
         logger.warning("gemini_call_failed reason=Gemini API error")
-        return _fallback("Gemini API error", retrieved, target_track)
+        trace.extend(
+            [
+                _trace_entry(
+                    "PLAN",
+                    1,
+                    "failed",
+                    detail="Gemini request failed while creating the plan.",
+                ),
+                _trace_entry(
+                    "DECIDE",
+                    1,
+                    "fallback",
+                    detail="Rule-based fallback selected: Gemini API error.",
+                ),
+            ]
+        )
+        return _fallback(
+            "Gemini API error",
+            retrieved,
+            target_track,
+            _redact_trace(trace, api_key),
+        )
     logger.info("gemini_call_succeeded target_track=%s", target_track or "unspecified")
 
+    repair_attempts = 0
     try:
-        steps = _validate_response(response_text, retrieved)
-    except AIOutputRejected as error:
-        logger.warning("ai_output_rejected reason=%s", error)
-        return _fallback(str(error), retrieved, target_track)
+        response_text = call_model(_build_prompt(safe_profile, retrieved, plan))
     except Exception:
-        logger.warning("ai_output_rejected reason=invalid response structure")
-        return _fallback("invalid response structure", retrieved, target_track)
+        logger.warning("gemini_call_failed reason=Gemini API error")
+        trace.extend(
+            [
+                _trace_entry(
+                    "GENERATE",
+                    1,
+                    "failed",
+                    detail="Gemini request failed while generating the path.",
+                ),
+                _trace_entry(
+                    "DECIDE",
+                    1,
+                    "fallback",
+                    detail="Rule-based fallback selected: Gemini API error.",
+                ),
+            ]
+        )
+        return _fallback(
+            "Gemini API error",
+            retrieved,
+            target_track,
+            _redact_trace(trace, api_key),
+        )
 
-    logger.info(
-        "ai_output_accepted target_track=%s reason=valid JSON and retrieved titles verified",
-        target_track or "unspecified",
-    )
-    return {"source": GEMINI_SOURCE, "steps": steps}
+    attempt_number = 1
+    while True:
+        trace.append(
+            _trace_entry(
+                "GENERATE",
+                attempt_number,
+                "draft_received",
+                detail=(
+                    "Received the initial path draft."
+                    if attempt_number == 1
+                    else "Received a corrected path draft."
+                ),
+            )
+        )
+        try:
+            steps = _validate_response(response_text, retrieved)
+        except AIOutputRejected as error:
+            trace.append(
+                _trace_entry(
+                    "VERIFY",
+                    attempt_number,
+                    "rejected",
+                    verifier_errors=error.errors,
+                    detail="The path draft did not pass verification.",
+                )
+            )
+            logger.warning(
+                "ai_output_rejected verifier_error_count=%d", len(error.errors)
+            )
+            if repair_attempts >= MAX_REPAIR_ATTEMPTS:
+                fallback_reason = (
+                    "AI output failed verification after 2 repair attempts"
+                )
+                trace.append(
+                    _trace_entry(
+                        "DECIDE",
+                        attempt_number,
+                        "fallback",
+                        verifier_errors=error.errors,
+                        detail=f"Rule-based fallback selected: {fallback_reason}.",
+                        repair_attempts=repair_attempts,
+                    )
+                )
+                return _fallback(
+                    fallback_reason,
+                    retrieved,
+                    target_track,
+                    _redact_trace(trace, api_key),
+                    repair_attempts,
+                )
+
+            repair_attempts += 1
+            trace.append(
+                _trace_entry(
+                    "SELF-CORRECT",
+                    repair_attempts,
+                    "requested",
+                    verifier_errors=error.errors,
+                    detail="Sent the verifier errors and prior draft for correction.",
+                )
+            )
+            repair_prompt = REPAIR_PROMPT_TEMPLATE.format(
+                errors_json=json.dumps(error.errors, ensure_ascii=False),
+                previous_output=response_text,
+                profile_json=json.dumps(safe_profile, sort_keys=True),
+                plan_json=json.dumps(plan, sort_keys=True),
+                retrieved_json=json.dumps(
+                    _prompt_opportunities(retrieved), sort_keys=True
+                ),
+            )
+            try:
+                response_text = call_model(repair_prompt)
+            except Exception:
+                logger.warning("gemini_call_failed reason=Gemini API error")
+                trace.extend(
+                    [
+                        _trace_entry(
+                            "SELF-CORRECT",
+                            repair_attempts,
+                            "failed",
+                            detail="Gemini request failed during self-correction.",
+                        ),
+                        _trace_entry(
+                            "DECIDE",
+                            attempt_number,
+                            "fallback",
+                            detail=(
+                                "Rule-based fallback selected: Gemini API error."
+                            ),
+                            repair_attempts=repair_attempts,
+                        ),
+                    ]
+                )
+                return _fallback(
+                    "Gemini API error",
+                    retrieved,
+                    target_track,
+                    _redact_trace(trace, api_key),
+                    repair_attempts,
+                )
+            attempt_number += 1
+        except Exception:
+            logger.warning("ai_output_rejected reason=invalid response structure")
+            fallback_reason = "invalid response structure"
+            trace.append(
+                _trace_entry(
+                    "VERIFY",
+                    attempt_number,
+                    "failed",
+                    detail=f"Rule-based fallback selected: {fallback_reason}.",
+                )
+            )
+            trace.append(
+                _trace_entry(
+                    "DECIDE",
+                    attempt_number,
+                    "fallback",
+                    detail=f"Rule-based fallback selected: {fallback_reason}.",
+                    repair_attempts=repair_attempts,
+                )
+            )
+            return _fallback(
+                fallback_reason,
+                retrieved,
+                target_track,
+                _redact_trace(trace, api_key),
+                repair_attempts,
+            )
+        else:
+            trace.extend(
+                [
+                    _trace_entry(
+                        "VERIFY",
+                        attempt_number,
+                        "accepted",
+                        detail=(
+                            "Valid JSON, retrieved titles, stage order, uniqueness, "
+                            "and stage-size limits passed."
+                        ),
+                    ),
+                    _trace_entry(
+                        "DECIDE",
+                        attempt_number,
+                        "accepted",
+                        detail=(
+                            "AI-generated path accepted after "
+                            f"{repair_attempts} self-correction(s)."
+                        ),
+                        repair_attempts=repair_attempts,
+                    ),
+                ]
+            )
+            logger.info(
+                "ai_output_accepted target_track=%s reason=verified path",
+                target_track or "unspecified",
+            )
+            source = (
+                GEMINI_SOURCE
+                if repair_attempts == 0
+                else (
+                    "Source: Gemini (verified after "
+                    f"{repair_attempts} self-correction"
+                    f"{'' if repair_attempts == 1 else 's'})"
+                )
+            )
+            return {
+                "source": source,
+                "steps": steps,
+                "trace": _redact_trace(trace, api_key),
+                "repair_attempts": repair_attempts,
+            }

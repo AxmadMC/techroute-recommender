@@ -3,6 +3,8 @@ import pytest
 from scripts.evaluate_reliability import (
     PROFILES,
     check_apply_contains_retrieved_internship_job,
+    check_agent_duplicate_titles,
+    check_agent_stage_size,
 )
 from src.profiles import EVALUATION_PROFILE_NAMES, PROFILE_LABELS, PROFILE_PRESETS
 
@@ -45,3 +47,33 @@ def test_apply_check_is_not_applicable_without_retrieved_internships_or_jobs():
 
     assert passed
     assert "not applicable" in detail
+
+
+def test_agent_stage_size_check_rejects_more_than_three_opportunities():
+    passed, detail = check_agent_stage_size(
+        {
+            "steps": [
+                {
+                    "stage": "Foundations",
+                    "opportunity_titles": ["A", "B", "C", "D"],
+                }
+            ]
+        }
+    )
+
+    assert not passed
+    assert "Foundations=4" in detail
+
+
+def test_agent_duplicate_title_check_rejects_titles_across_stages():
+    passed, detail = check_agent_duplicate_titles(
+        {
+            "steps": [
+                {"stage": "Foundations", "opportunity_titles": ["Same title"]},
+                {"stage": "Build Skills", "opportunity_titles": ["Same title"]},
+            ]
+        }
+    )
+
+    assert not passed
+    assert "Same title" in detail

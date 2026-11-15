@@ -63,6 +63,9 @@ def _write_heading(pdf: FPDF, text: str, level: int = 2) -> None:
 
 def _source_text(source_label: str, fallback_reason: Optional[str]) -> str:
     if "Gemini" in source_label or "AI-generated" in source_label:
+        if "(verified after " in source_label:
+            verification = source_label.split("Gemini (", 1)[1].rstrip(")")
+            return f"AI-generated ({verification})"
         return "AI-generated (verified against retrieved data)"
     reason = fallback_reason
     if not reason and "(reason: " in source_label:

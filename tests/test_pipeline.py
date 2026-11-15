@@ -79,10 +79,28 @@ def make_gemini_response():
     )
 
 
+def make_plan_response():
+    return json.dumps(
+        {
+            "assignments": [
+                {
+                    "title": "Intro to Python",
+                    "stage": "Foundations",
+                    "reason": "It introduces the target skill.",
+                }
+            ]
+        }
+    )
+
+
 def test_offline_pipeline_uses_fallback_without_calling_gemini(monkeypatch):
     monkeypatch.setattr(
         "src.path_generator._call_gemini",
         lambda *args: pytest.fail("offline pipeline must not call Gemini"),
+    )
+    monkeypatch.setattr(
+        "src.path_generator._load_gemini_config",
+        lambda: pytest.fail("offline pipeline must not load Gemini configuration"),
     )
 
     result = run_pipeline(
@@ -94,6 +112,9 @@ def test_offline_pipeline_uses_fallback_without_calling_gemini(monkeypatch):
     assert result["source_label"] == f"{FALLBACK_SOURCE} (reason: offline mode)"
     assert result["fallback_reason"] == "offline mode"
     assert result["recommendations"][0][0]["title"] == "Intro to Python"
+    trace = result["learning_path"]["trace"]
+    assert [entry["step_name"] for entry in trace] == ["PLAN", "DECIDE"]
+    assert trace[0]["decision"] == "skipped"
 
 
 def test_pipeline_uses_mocked_gemini_response(monkeypatch):
@@ -105,7 +126,7 @@ def test_pipeline_uses_mocked_gemini_response(monkeypatch):
 
     def fake_gemini(prompt, api_key, model):
         calls.append((prompt, model))
-        return make_gemini_response()
+        return make_plan_response() if len(calls) == 1 else make_gemini_response()
 
     monkeypatch.setattr("src.path_generator._call_gemini", fake_gemini)
     result = run_pipeline(
@@ -115,8 +136,8 @@ def test_pipeline_uses_mocked_gemini_response(monkeypatch):
 
     assert result["source_label"] == GEMINI_SOURCE
     assert result["fallback_reason"] is None
-    assert len(calls) == 1
-    assert "test-only-key" not in calls[0][0]
+    assert len(calls) == 2
+    assert all("test-only-key" not in prompt for prompt, _ in calls)
 
 
 def test_pipeline_rejects_invalid_profile():

@@ -120,6 +120,47 @@ def test_no_options_uses_software_engineering_default_without_gemini(
     assert captured_profile["target_track"] == "software_engineering"
 
 
+def test_trace_flag_prints_agent_trace_after_learning_path(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(
+        app,
+        "configure_logging",
+        lambda: configure_logging(tmp_path / "trace.log"),
+    )
+    monkeypatch.setattr(
+        app,
+        "run_pipeline",
+        lambda profile, offline=False, dataset_path=None: {
+            "recommendations": [],
+            "learning_path": {
+                "steps": [],
+                "trace": [
+                    {
+                        "step_name": "PLAN",
+                        "attempt_number": 1,
+                        "decision": "accepted",
+                        "detail": "Created a plan.",
+                        "verifier_errors": [],
+                        "plan": [],
+                    }
+                ],
+            },
+            "source_label": "test source",
+            "fallback_reason": None,
+        },
+    )
+
+    exit_code = app.main(["--trace"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.out.index("Generated learning path") < captured.out.index(
+        "Agent trace:"
+    )
+    assert "PLAN (attempt 1): accepted - Created a plan." in captured.out
+
+
 def test_cli_and_evaluator_use_shared_profile_presets():
     assert app.PROFILE_PRESETS is PROFILE_PRESETS
     assert set(EVALUATION_PROFILE_NAMES) == set(PROFILE_PRESETS)
