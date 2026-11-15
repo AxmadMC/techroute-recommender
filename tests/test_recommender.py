@@ -58,11 +58,12 @@ def make_small_recommender() -> Recommender:
 
 def test_recommend_returns_opportunities_sorted_by_score():
     user = UserProfile(
-        career_track="software_engineering",
+        target_track="software_engineering",
         preferred_format="self_paced",
         skill_level=0.2,
+        prefers_free=True,
+        needs_remote=True,
         max_hours=10,
-        remote=True,
         interests=["python"],
     )
     recommender = make_small_recommender()
@@ -74,7 +75,7 @@ def test_recommend_returns_opportunities_sorted_by_score():
 
 
 def test_explain_recommendation_returns_non_empty_string():
-    user = UserProfile(career_track="software_engineering")
+    user = UserProfile(target_track="software_engineering")
     recommender = make_small_recommender()
 
     explanation = recommender.explain_recommendation(
@@ -88,11 +89,12 @@ def test_opportunity_score_uses_techroute_preferences():
     recommender = make_small_recommender()
     opportunity = recommender.opportunities[0]
     user_prefs = {
-        "career_track": "software_engineering",
-        "format": "self_paced",
+        "target_track": "software_engineering",
+        "preferred_format": "self_paced",
         "skill_level": 0.2,
+        "prefers_free": True,
+        "needs_remote": True,
         "max_hours": 10,
-        "remote": True,
         "interests": ["python"],
     }
 
@@ -104,7 +106,7 @@ def test_opportunity_score_uses_techroute_preferences():
 def test_functional_api_returns_scored_opportunities():
     recommender = make_small_recommender()
     results = recommend_opportunities(
-        {"career_track": "software_engineering"},
+        {"target_track": "software_engineering"},
         [opportunity.__dict__ for opportunity in recommender.opportunities],
         k=1,
     )
@@ -113,6 +115,94 @@ def test_functional_api_returns_scored_opportunities():
     assert results[0][0]["title"] == "Python Backend Course"
     assert isinstance(results[0][1], float)
     assert results[0][2]
+
+
+def test_recommender_requires_remote_and_reports_shortfall(capsys):
+    recommender = make_small_recommender()
+    recommender.opportunities[1].remote = False
+    user = UserProfile(needs_remote=True)
+
+    results = recommender.recommend(user, k=5)
+    explanation = recommender.explain_recommendation(user, results[0])
+
+    assert [opportunity.id for opportunity in results] == [1]
+    assert "Remote requirement met" in explanation
+    assert "Remote requirement matched 1 opportunities" in capsys.readouterr().out
+
+
+def test_functional_recommender_requires_remote_and_reports_shortfall(capsys):
+    recommender = make_small_recommender()
+    opportunities = [
+        opportunity.__dict__.copy() for opportunity in recommender.opportunities
+    ]
+    opportunities[1]["remote"] = False
+
+    results = recommend_opportunities(
+        {"needs_remote": True}, opportunities, k=5
+    )
+
+    assert [opportunity["id"] for opportunity, _, _ in results] == [1]
+    assert "Remote requirement met" in results[0][2]
+    assert "Remote requirement matched 1 opportunities" in capsys.readouterr().out
+
+
+def test_remote_false_keeps_both_and_rewards_nonremote_match(capsys):
+    recommender = make_small_recommender()
+    opportunities = [
+        opportunity.__dict__.copy() for opportunity in recommender.opportunities
+    ]
+    opportunities[1]["remote"] = False
+
+    results = recommend_opportunities(
+        {"needs_remote": False}, opportunities, k=5
+    )
+
+    assert len(results) == 2
+    assert results[0][0]["id"] == 2
+    assert "remote preference match (+0.50)" in results[0][2]
+    assert capsys.readouterr().out == ""
+
+
+def test_prefers_free_controls_free_priority_and_explanation():
+    opportunity = make_small_recommender().opportunities[0].__dict__.copy()
+    expected_points = {"free": 1.0, "freemium": 0.5, "paid": 0.0}
+
+    for cost_type, points in expected_points.items():
+        opportunity["cost_type"] = cost_type
+        preferred_score, preferred_reasons = score_opportunity(
+            {"prefers_free": True}, opportunity
+        )
+        ignored_score, ignored_reasons = score_opportunity(
+            {"prefers_free": False}, opportunity
+        )
+
+        assert preferred_score == points
+        assert ignored_score == 0
+        assert f"free priority (+{points:.2f})" in preferred_reasons
+        assert "Free preference disabled (+0.00)" in ignored_reasons
+
+
+def test_prior_experience_penalty_applies_only_below_threshold():
+    opportunity = make_small_recommender().opportunities[0].__dict__.copy()
+    opportunity["eligibility"] = "prior_experience"
+    low_skill = {"skill_level": 0.49, "prefers_free": False}
+    threshold_skill = {"skill_level": 0.5, "prefers_free": False}
+
+    penalized_score, penalized_reasons = score_opportunity(low_skill, opportunity)
+    baseline_score, _ = score_opportunity(
+        low_skill, {**opportunity, "eligibility": ""}
+    )
+    threshold_score, threshold_reasons = score_opportunity(
+        threshold_skill, opportunity
+    )
+    threshold_baseline, _ = score_opportunity(
+        threshold_skill, {**opportunity, "eligibility": ""}
+    )
+
+    assert penalized_score == baseline_score - 1.0
+    assert "Penalty -1.0: requires prior experience" in penalized_reasons
+    assert threshold_score == threshold_baseline
+    assert "Penalty -1.0: requires prior experience" not in threshold_reasons
 
 
 def test_loader_parses_opportunities_csv_schema():

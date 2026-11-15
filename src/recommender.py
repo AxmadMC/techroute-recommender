@@ -41,11 +41,12 @@ class Opportunity:
 class UserProfile:
     """Represents a user's technology career preferences."""
 
-    career_track: Optional[str] = None
+    target_track: Optional[str] = None
     preferred_format: Optional[str] = None
     skill_level: float = 0.3
+    prefers_free: bool = True
+    needs_remote: Optional[bool] = None
     max_hours: Optional[float] = None
-    remote: Optional[bool] = None
     interests: List[str] = field(default_factory=list)
 
 
@@ -58,8 +59,9 @@ class Recommender:
     def recommend(self, user: UserProfile, k: int = 5) -> List[Opportunity]:
         """Returns the top k opportunities for the user, highest score first."""
         prefs = _profile_to_prefs(user)
+        eligible = _filter_remote_opportunities(prefs, self.opportunities)
         ranked = sorted(
-            self.opportunities,
+            eligible,
             key=lambda opportunity: _rank_key(
                 score_opportunity(prefs, asdict(opportunity))[0],
                 asdict(opportunity),
@@ -79,11 +81,12 @@ class Recommender:
 def _profile_to_prefs(user: UserProfile) -> Dict:
     """Converts a UserProfile into the user_prefs dict used by score_opportunity."""
     return {
-        "career_track": user.career_track,
-        "format": user.preferred_format,
+        "target_track": user.target_track,
+        "preferred_format": user.preferred_format,
         "skill_level": user.skill_level,
+        "prefers_free": user.prefers_free,
+        "needs_remote": user.needs_remote,
         "max_hours": user.max_hours,
-        "remote": user.remote,
         "interests": user.interests,
     }
 
@@ -108,6 +111,31 @@ def _rank_key(score: float, opportunity: Dict) -> Tuple[float, int, float, int]:
         opportunity.get("career_value") or 0.0,
         -(opportunity.get("id") or 0),
     )
+
+
+def _needs_remote(user_prefs: Dict) -> bool:
+    return user_prefs.get("needs_remote", user_prefs.get("remote")) is True
+
+
+def _filter_remote_opportunities(user_prefs: Dict, opportunities: List):
+    if not _needs_remote(user_prefs):
+        return opportunities
+
+    filtered = [
+        opportunity
+        for opportunity in opportunities
+        if (
+            opportunity.get("remote") is True
+            if isinstance(opportunity, dict)
+            else opportunity.remote is True
+        )
+    ]
+    if len(filtered) < 5:
+        print(
+            f"Remote requirement matched {len(filtered)} opportunities; "
+            "returning all available matches (fewer than 5)."
+        )
+    return filtered
 
 
 def load_opportunities(csv_path: str) -> List[Dict]:
@@ -142,7 +170,7 @@ def score_opportunity(
     score = 0.0
     reasons: List[str] = []
 
-    career_track = user_prefs.get("career_track")
+    career_track = user_prefs.get("target_track", user_prefs.get("career_track"))
     if career_track:
         opportunity_track = _normalize(opportunity.get("career_track"))
         if _normalize(career_track) == opportunity_track:
@@ -156,7 +184,9 @@ def score_opportunity(
             score += points
             reasons.append(f"career track match (+{points:.2f})")
 
-    preferred_format = user_prefs.get("format")
+    preferred_format = user_prefs.get(
+        "preferred_format", user_prefs.get("format")
+    )
     opportunity_format = opportunity.get("format")
     if preferred_format and opportunity_format:
         if _normalize(preferred_format) == _normalize(opportunity_format):
@@ -170,15 +200,26 @@ def score_opportunity(
         score += DIFFICULTY_WEIGHT * similarity
         reasons.append(f"difficulty fit (+{DIFFICULTY_WEIGHT * similarity:.2f})")
 
-    free_priority = {"free": 1.0, "freemium": 0.5, "paid": 0.0}.get(
-        opportunity.get("cost_type"), 0.0
+    prefers_free = user_prefs.get("prefers_free", True)
+    free_priority = (
+        {"free": 1.0, "freemium": 0.5, "paid": 0.0}.get(
+            opportunity.get("cost_type"), 0.0
+        )
+        if prefers_free
+        else 0.0
     )
     score += FREE_PRIORITY_WEIGHT * free_priority
-    if free_priority:
+    if prefers_free:
         reasons.append(f"free priority (+{FREE_PRIORITY_WEIGHT * free_priority:.2f})")
+    else:
+        reasons.append("Free preference disabled (+0.00)")
 
-    preferred_remote = user_prefs.get("remote")
+    preferred_remote = user_prefs.get(
+        "needs_remote", user_prefs.get("remote")
+    )
     opportunity_remote = opportunity.get("remote")
+    if _needs_remote(user_prefs) and opportunity_remote is True:
+        reasons.append("Remote requirement met")
     if preferred_remote is not None and opportunity_remote is not None:
         if preferred_remote == opportunity_remote:
             score += REMOTE_WEIGHT
@@ -208,6 +249,13 @@ def score_opportunity(
             score += points
             reasons.append(f"interest overlap (+{points:.2f})")
 
+    eligibility = {
+        _normalize(tag) for tag in (opportunity.get("eligibility") or "").split(";")
+    }
+    if "prior_experience" in eligibility and skill_level is not None and skill_level < 0.5:
+        score -= 1.0
+        reasons.append("Penalty -1.0: requires prior experience")
+
     return score, reasons
 
 
@@ -216,7 +264,8 @@ def recommend_opportunities(
 ) -> List[Tuple[Dict, float, str]]:
     """Returns the top k opportunities with their scores and explanations."""
     scored = []
-    for opportunity in opportunities:
+    eligible = _filter_remote_opportunities(user_prefs, opportunities)
+    for opportunity in eligible:
         score, reasons = score_opportunity(user_prefs, opportunity)
         scored.append((opportunity, score, _build_explanation(reasons)))
     scored.sort(key=lambda item: _rank_key(item[1], item[0]), reverse=True)
