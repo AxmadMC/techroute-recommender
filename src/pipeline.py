@@ -38,6 +38,7 @@ def run_pipeline(
     offline: bool = False,
     opportunities: Optional[List[Opportunity]] = None,
     dataset_path: Optional[Path] = None,
+    use_guides: bool = True,
 ) -> PipelineResult:
     """Load, validate, rank, and generate a path using the existing pipeline."""
     logger = logging.getLogger("techroute")
@@ -69,6 +70,7 @@ def run_pipeline(
         safe_profile,
         opportunities,
         offline=offline,
+        use_guides=use_guides,
     )
 
     source_label = str(learning_path["source"])

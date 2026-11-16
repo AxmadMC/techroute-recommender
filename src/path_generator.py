@@ -13,6 +13,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
+from src.guide_retriever import retrieve_guide_sections
 from src.recommender import recommend_opportunities
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -204,6 +205,7 @@ def _build_prompt(
     profile: Dict[str, object],
     retrieved: List[Dict[str, object]],
     plan: List[Dict[str, str]],
+    track_context: List[Dict[str, str]],
 ) -> str:
     prompt_opportunities = [
         {key: item[key] for key in PROMPT_FIELDS}
@@ -223,18 +225,30 @@ def _build_prompt(
         profile_json=json.dumps(profile, sort_keys=True),
         plan_json=json.dumps(plan, sort_keys=True),
         retrieved_json=json.dumps(prompt_opportunities, sort_keys=True),
+        track_context=_format_track_context(track_context),
     )
 
 
-PLAN_PROMPT_TEMPLATE = """Create a short plan for a technology learning path. Return only valid JSON with one top-level "assignments" array. Each assignment must have exactly these keys: "title" (an exact retrieved title), "stage" (one of Foundations, Build Skills, Prove Skills, Apply), and "reason" (one concise sentence explaining the choice using learning preferences or opportunity type). Assign each retrieved opportunity at most once. Put internships and jobs in Apply when present. Do not invent titles or include any other fields.
+def _format_track_context(sections: List[Dict[str, str]]) -> str:
+    if not sections:
+        return "No track guide context is available."
+    return "\n\n".join(
+        f"## {section['name']}\n{section['content']}" for section in sections
+    )
+
+
+PLAN_PROMPT_TEMPLATE = """Create a short plan for a technology learning path. Return only valid JSON with one top-level "assignments" array. Each assignment must have exactly these keys: "title" (an exact retrieved title), "stage" (one of Foundations, Build Skills, Prove Skills, Apply), and "reason" (one concise sentence explaining the choice using learning preferences, track context, or opportunity type). Assign each retrieved opportunity at most once. Put internships and jobs in Apply when present. Do not invent titles or include any other fields. Use track context for track-specific planning, but select opportunity titles ONLY from the retrieved opportunities.
 
 Student learning preferences:
 {profile_json}
 
 Retrieved opportunities (the only allowed resources):
-{retrieved_json}"""
+{retrieved_json}
 
-GENERATE_PROMPT_TEMPLATE = """Create a practical beginner-aware technology learning path using the plan as guidance. Return only valid JSON as an array of exactly four steps in this order: Foundations, Build Skills, Prove Skills, Apply. Every step must have exactly these keys: step_number (integer, 1 through 4), stage (string), goal (string), opportunity_titles (array of exact titles), and why (string). Use ONLY the retrieved opportunities; never invent or recommend resources, certifications, URLs, internships, or jobs. Each title may appear in only one stage, and each stage may contain at most 3 opportunities. Keep goals and reasons general; refer to specific resources only by listing their retrieved titles. {apply_instruction}
+Track context (guidance only, never a source of opportunity titles):
+{track_context}"""
+
+GENERATE_PROMPT_TEMPLATE = """Create a practical beginner-aware technology learning path using the plan as guidance. Return only valid JSON as an array of exactly four steps in this order: Foundations, Build Skills, Prove Skills, Apply. Every step must have exactly these keys: step_number (integer, 1 through 4), stage (string), goal (string), opportunity_titles (array of exact titles), and why (string). Use track context to make goals and explanations specific to this track. Use opportunity titles ONLY from the retrieved opportunities list; track context is guidance, never a source of opportunity titles. Never invent or recommend resources, certifications, URLs, internships, or jobs. Each title may appear in only one stage, and each stage may contain at most 3 opportunities. Keep goals and reasons general; refer to specific resources only by listing their retrieved titles. {apply_instruction}
 
 Student learning preferences:
 {profile_json}
@@ -243,9 +257,12 @@ Agent plan:
 {plan_json}
 
 Retrieved opportunities (the only allowed resources):
-{retrieved_json}"""
+{retrieved_json}
 
-REPAIR_PROMPT_TEMPLATE = """Correct the previous learning path so it passes every verifier check. Return only valid JSON as an array of exactly four steps in this order: Foundations, Build Skills, Prove Skills, Apply. Every step must have exactly these keys: step_number (integer, 1 through 4), stage (string), goal (string), opportunity_titles (array of exact titles), and why (string). Use ONLY the retrieved opportunities. Do not repeat a title across stages, and include at most 3 opportunities per stage. Address every verifier error listed below; keep the Apply step consistent with the retrieved internship/job data.
+Track context (guidance only, never a source of opportunity titles):
+{track_context}"""
+
+REPAIR_PROMPT_TEMPLATE = """Correct the previous learning path so it passes every verifier check. Return only valid JSON as an array of exactly four steps in this order: Foundations, Build Skills, Prove Skills, Apply. Every step must have exactly these keys: step_number (integer, 1 through 4), stage (string), goal (string), opportunity_titles (array of exact titles), and why (string). Use track context for track-specific goals and explanations. Use ONLY titles from the retrieved opportunities; track context is guidance and never a source of opportunity titles. Do not repeat a title across stages, and include at most 3 opportunities per stage. Address every verifier error listed below; keep the Apply step consistent with the retrieved internship/job data.
 
 Verifier errors:
 {errors_json}
@@ -260,7 +277,10 @@ Agent plan:
 {plan_json}
 
 Retrieved opportunities (the only allowed resources):
-{retrieved_json}"""
+{retrieved_json}
+
+Track context (guidance only, never a source of opportunity titles):
+{track_context}"""
 
 
 def _prompt_opportunities(
@@ -270,11 +290,14 @@ def _prompt_opportunities(
 
 
 def _build_plan_prompt(
-    profile: Dict[str, object], retrieved: List[Dict[str, object]]
+    profile: Dict[str, object],
+    retrieved: List[Dict[str, object]],
+    track_context: List[Dict[str, str]],
 ) -> str:
     return PLAN_PROMPT_TEMPLATE.format(
         profile_json=json.dumps(profile, sort_keys=True),
         retrieved_json=json.dumps(_prompt_opportunities(retrieved), sort_keys=True),
+        track_context=_format_track_context(track_context),
     )
 
 
@@ -606,6 +629,7 @@ def generate_learning_path(
     opportunities: List[Dict],
     gemini_call: Optional[GeminiCall] = None,
     offline: bool = False,
+    use_guides: bool = True,
 ) -> LearningPath:
     """Generate a verified Gemini path or a deterministic retrieved-data fallback."""
     safe_profile = validate_profile(profile)
@@ -652,6 +676,10 @@ def generate_learning_path(
         )
         return _fallback("no API key", retrieved, target_track, trace)
 
+    guide_sections = (
+        retrieve_guide_sections(safe_profile) if use_guides else []
+    )
+    guide_section_names = [section["name"] for section in guide_sections]
     call_count = 0
 
     def call_model(prompt: str) -> str:
@@ -668,7 +696,9 @@ def generate_learning_path(
         target_track or "unspecified",
     )
     try:
-        plan_response = call_model(_build_plan_prompt(safe_profile, retrieved))
+        plan_response = call_model(
+            _build_plan_prompt(safe_profile, retrieved, guide_sections)
+        )
         plan = _validate_plan(plan_response, retrieved)
         trace.append(
             _trace_entry(
@@ -677,6 +707,7 @@ def generate_learning_path(
                 "accepted",
                 detail=f"Created a plan for {len(plan)} retrieved opportunities.",
                 plan=plan,
+                guide_sections=guide_section_names,
             )
         )
     except AIOutputRejected as error:
@@ -687,6 +718,7 @@ def generate_learning_path(
                     1,
                     "rejected",
                     verifier_errors=error.errors,
+                    guide_sections=guide_section_names,
                 ),
                 _trace_entry(
                     "DECIDE",
@@ -712,6 +744,7 @@ def generate_learning_path(
                     1,
                     "failed",
                     detail="Gemini request failed while creating the plan.",
+                    guide_sections=guide_section_names,
                 ),
                 _trace_entry(
                     "DECIDE",
@@ -731,7 +764,9 @@ def generate_learning_path(
 
     repair_attempts = 0
     try:
-        response_text = call_model(_build_prompt(safe_profile, retrieved, plan))
+        response_text = call_model(
+            _build_prompt(safe_profile, retrieved, plan, guide_sections)
+        )
     except Exception:
         logger.warning("gemini_call_failed reason=Gemini API error")
         trace.extend(
@@ -826,6 +861,7 @@ def generate_learning_path(
                 retrieved_json=json.dumps(
                     _prompt_opportunities(retrieved), sort_keys=True
                 ),
+                track_context=_format_track_context(guide_sections),
             )
             try:
                 response_text = call_model(repair_prompt)

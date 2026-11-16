@@ -39,6 +39,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Print the learning-path agent trace after the path.",
     )
+    parser.add_argument(
+        "--no-guides",
+        action="store_true",
+        help="Disable track guides and use opportunity retrieval only.",
+    )
     args = parser.parse_args(argv)
 
     if args.list_profiles:
@@ -62,6 +67,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             PROFILE_PRESETS[args.profile],
             offline=args.offline,
             dataset_path=DATASET_PATH,
+            use_guides=not args.no_guides,
         )
     except PipelineValidationError as error:
         print(f"Error: invalid profile: {error}", file=sys.stderr)

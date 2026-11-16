@@ -336,6 +336,18 @@ with path_tab:
                 st.write(step["why"])
 
         with st.expander("How the AI built this path"):
+            guide_sections = next(
+                (
+                    entry.get("guide_sections", [])
+                    for entry in result["learning_path"].get("trace", [])
+                    if "guide_sections" in entry
+                ),
+                [],
+            )
+            st.write(
+                "Track context sections used: "
+                + (", ".join(guide_sections) if guide_sections else "none")
+            )
             trace_lines = format_agent_trace(
                 result["learning_path"].get("trace", [])
             )

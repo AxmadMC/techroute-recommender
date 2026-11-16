@@ -100,9 +100,13 @@ def test_no_options_uses_software_engineering_default_without_gemini(
         lambda: configure_logging(tmp_path / "logs" / "default.log"),
     )
     captured_profile = {}
+    captured_guides = {}
 
-    def fake_pipeline(profile, offline=False, dataset_path=None):
+    def fake_pipeline(
+        profile, offline=False, dataset_path=None, use_guides=True
+    ):
         captured_profile.update(profile)
+        captured_guides["enabled"] = use_guides
         return {
             "recommendations": [],
             "learning_path": {"steps": []},
@@ -118,6 +122,32 @@ def test_no_options_uses_software_engineering_default_without_gemini(
     assert exit_code == 0
     assert captured_profile == PROFILE_PRESETS[DEFAULT_PROFILE_NAME]
     assert captured_profile["target_track"] == "software_engineering"
+    assert captured_guides["enabled"]
+
+
+def test_no_guides_flag_disables_track_context(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        app,
+        "configure_logging",
+        lambda: configure_logging(tmp_path / "no-guides.log"),
+    )
+    captured = {}
+
+    def fake_pipeline(profile, offline=False, dataset_path=None, use_guides=True):
+        captured["use_guides"] = use_guides
+        return {
+            "recommendations": [],
+            "learning_path": {"steps": []},
+            "source_label": "test source",
+            "fallback_reason": None,
+        }
+
+    monkeypatch.setattr(app, "run_pipeline", fake_pipeline)
+    exit_code = app.main(["--no-guides"])
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured["use_guides"] is False
 
 
 def test_trace_flag_prints_agent_trace_after_learning_path(
@@ -131,7 +161,7 @@ def test_trace_flag_prints_agent_trace_after_learning_path(
     monkeypatch.setattr(
         app,
         "run_pipeline",
-        lambda profile, offline=False, dataset_path=None: {
+        lambda profile, offline=False, dataset_path=None, use_guides=True: {
             "recommendations": [],
             "learning_path": {
                 "steps": [],

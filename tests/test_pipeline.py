@@ -140,6 +140,105 @@ def test_pipeline_uses_mocked_gemini_response(monkeypatch):
     assert all("test-only-key" not in prompt for prompt, _ in calls)
 
 
+def test_guide_context_is_in_prompts_but_cannot_supply_titles(monkeypatch):
+    calls = []
+    guide_only_title = "Guide-only opportunity"
+    monkeypatch.setattr(
+        "src.path_generator._load_gemini_config",
+        lambda: ("test-only-key", "gemini-test"),
+    )
+    monkeypatch.setattr(
+        "src.path_generator.retrieve_guide_sections",
+        lambda profile: [
+            {
+                "name": "Core skills",
+                "content": f"Programming fundamentals; {guide_only_title}",
+            }
+        ],
+    )
+
+    invalid_path = json.loads(make_gemini_response())
+    invalid_path[0]["opportunity_titles"] = [guide_only_title]
+
+    def fake_gemini(prompt, api_key, model):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return make_plan_response()
+        if len(calls) == 2:
+            return json.dumps(invalid_path)
+        return make_gemini_response()
+
+    monkeypatch.setattr("src.path_generator._call_gemini", fake_gemini)
+    result = run_pipeline(make_profile(), opportunities=make_opportunities())
+
+    assert len(calls) == 3
+    assert all(guide_only_title in prompt for prompt in calls)
+    assert result["learning_path"]["trace"][0]["guide_sections"] == ["Core skills"]
+    assert any(
+        entry["step_name"] == "VERIFY"
+        and "AI output referenced an opportunity not in the retrieved data"
+        in entry["verifier_errors"]
+        for entry in result["learning_path"]["trace"]
+    )
+    assert guide_only_title not in {
+        title
+        for step in result["learning_path"]["steps"]
+        for title in step["opportunity_titles"]
+    }
+
+
+def test_no_guides_excludes_guide_text_from_prompts(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "src.path_generator._load_gemini_config",
+        lambda: ("test-only-key", "gemini-test"),
+    )
+    monkeypatch.setattr(
+        "src.path_generator.retrieve_guide_sections",
+        lambda profile: pytest.fail("disabled guides must not be retrieved"),
+    )
+
+    def fake_gemini(prompt, api_key, model):
+        calls.append(prompt)
+        return make_plan_response() if len(calls) == 1 else make_gemini_response()
+
+    monkeypatch.setattr("src.path_generator._call_gemini", fake_gemini)
+    result = run_pipeline(
+        make_profile(),
+        opportunities=make_opportunities(),
+        use_guides=False,
+    )
+
+    assert len(calls) == 2
+    assert all("Programming fundamentals" not in prompt for prompt in calls)
+    assert result["learning_path"]["trace"][0]["guide_sections"] == []
+
+
+def test_missing_guide_does_not_break_pipeline(monkeypatch, tmp_path):
+    from src.guide_retriever import retrieve_guide_sections
+
+    monkeypatch.setattr(
+        "src.path_generator._load_gemini_config",
+        lambda: ("test-only-key", "gemini-test"),
+    )
+    monkeypatch.setattr(
+        "src.path_generator.retrieve_guide_sections",
+        lambda profile: retrieve_guide_sections(profile, tmp_path),
+    )
+    calls = []
+
+    def fake_gemini(prompt, api_key, model):
+        calls.append(prompt)
+        return make_plan_response() if len(calls) == 1 else make_gemini_response()
+
+    monkeypatch.setattr("src.path_generator._call_gemini", fake_gemini)
+    result = run_pipeline(make_profile(), opportunities=make_opportunities())
+
+    assert result["source_label"] == GEMINI_SOURCE
+    assert len(calls) == 2
+    assert result["learning_path"]["trace"][0]["guide_sections"] == []
+
+
 def test_pipeline_rejects_invalid_profile():
     with pytest.raises(PipelineValidationError, match="supported career track"):
         run_pipeline(
